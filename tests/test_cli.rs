@@ -69,6 +69,11 @@ fn test_record_creates_trace_files() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    // Verify the three trace output files exist.
+    assert!(
+        out_dir.join("trace.bin").exists(),
+        "trace.bin should exist in output directory"
+    );
     assert!(
         out_dir.join("trace_metadata.json").exists(),
         "trace_metadata.json should exist in output directory"
@@ -78,13 +83,23 @@ fn test_record_creates_trace_files() {
         "trace_paths.json should exist in output directory"
     );
 
-    // Verify trace_metadata.json is valid JSON
+    // Verify trace_metadata.json is valid JSON with expected fields.
     let metadata_content =
         std::fs::read_to_string(out_dir.join("trace_metadata.json")).expect("failed to read metadata");
     let metadata: serde_json::Value =
         serde_json::from_str(&metadata_content).expect("trace_metadata.json should be valid JSON");
-    assert_eq!(
-        metadata["recorder"], "codetracer-miden-recorder",
-        "metadata should identify the recorder"
+    assert!(
+        metadata["program"].as_str().unwrap().contains("compute.masm"),
+        "metadata should reference the source program"
+    );
+
+    // Verify trace_paths.json is valid JSON listing the source file.
+    let paths_content =
+        std::fs::read_to_string(out_dir.join("trace_paths.json")).expect("failed to read paths");
+    let paths: serde_json::Value =
+        serde_json::from_str(&paths_content).expect("trace_paths.json should be valid JSON");
+    assert!(
+        paths.as_array().unwrap().len() >= 1,
+        "trace_paths.json should list at least one path"
     );
 }

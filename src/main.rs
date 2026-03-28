@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use codetracer_trace_writer::TraceEventsFileFormat;
 use eyre::{Context, Result};
 
 // ---------------------------------------------------------------------------
@@ -100,48 +101,20 @@ fn record(args: RecordArgs) -> Result<()> {
 
     eprintln!("Source file: {}", source_path.display());
 
-    // 2. Print not-yet-implemented message
-    eprintln!("Recording is not yet implemented — writing placeholder trace files.");
+    let format = match args.format {
+        OutputFormat::Binary => TraceEventsFileFormat::Binary,
+        OutputFormat::Json => TraceEventsFileFormat::Json,
+    };
 
-    // 3. Create the output directory
+    // 2. Create the output directory
     let out_dir = &args.out_dir;
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
 
-    // 4. Write placeholder trace_metadata.json
-    let metadata = serde_json::json!({
-        "version": "0.1.0",
-        "recorder": "codetracer-miden-recorder",
-        "format": match args.format {
-            OutputFormat::Binary => "binary",
-            OutputFormat::Json => "json",
-        },
-        "source_file": source_path.to_string_lossy(),
-        "status": "placeholder"
-    });
-    let metadata_path = out_dir.join("trace_metadata.json");
-    std::fs::write(
-        &metadata_path,
-        serde_json::to_string_pretty(&metadata).unwrap(),
-    )
-    .with_context(|| format!("failed to write {}", metadata_path.display()))?;
-
-    // 5. Write placeholder trace_paths.json
-    let paths = serde_json::json!({
-        "trace_metadata": "trace_metadata.json",
-        "source_files": [source_path.to_string_lossy()]
-    });
-    let paths_path = out_dir.join("trace_paths.json");
-    std::fs::write(
-        &paths_path,
-        serde_json::to_string_pretty(&paths).unwrap(),
-    )
-    .with_context(|| format!("failed to write {}", paths_path.display()))?;
+    // 3. Run the recorder
+    codetracer_miden_recorder::recorder::record(&source_path, out_dir, format)?;
 
     eprintln!("Trace files written to {}", out_dir.display());
-    eprintln!("  trace_metadata.json");
-    eprintln!("  trace_paths.json");
 
-    // 6. Exit with code 0
     Ok(())
 }
