@@ -53,6 +53,54 @@ impl SourceMap {
     }
 }
 
+/// Maps source locations across multiple files.
+///
+/// When midenc compiles Rust code, different assembly operations may reference
+/// different `.rs` source files. `MultiSourceMap` holds a `SourceMap` for each
+/// file, keyed by its URI (typically the file path string from `Location.path`).
+pub struct MultiSourceMap {
+    maps: std::collections::HashMap<String, SourceMap>,
+}
+
+impl MultiSourceMap {
+    /// Create an empty `MultiSourceMap`.
+    pub fn new() -> Self {
+        Self {
+            maps: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Add a source file to the map.
+    ///
+    /// `uri` is the key used to look up this file (typically the path string
+    /// from a Miden `Location`). `path` is the filesystem path, and `source`
+    /// is the file contents.
+    pub fn add_file(&mut self, uri: &str, path: &Path, source: &str) {
+        let sm = SourceMap::from_source(path, source);
+        self.maps.insert(uri.to_string(), sm);
+    }
+
+    /// Resolve a byte offset in the file identified by `uri` to a `(path, line)` pair.
+    ///
+    /// Returns `None` if the URI is not known.
+    pub fn resolve(&self, uri: &str, byte_offset: u32) -> Option<(&Path, u32)> {
+        self.maps
+            .get(uri)
+            .map(|sm| (sm.path(), sm.byte_to_line(byte_offset)))
+    }
+
+    /// Check whether a URI is present in the map.
+    pub fn contains(&self, uri: &str) -> bool {
+        self.maps.contains_key(uri)
+    }
+}
+
+impl Default for MultiSourceMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

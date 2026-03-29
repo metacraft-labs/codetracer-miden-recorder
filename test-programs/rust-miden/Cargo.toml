@@ -1,0 +1,13 @@
+[package]
+name = "rust-miden-test"
+version = "0.1.0"
+edition = "2021"
+description = "Test program for Rust-via-midenc source-level debugging"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The miden SDK crate — required for cargo-miden compilation.
+# This Cargo.toml serves as a template; building requires cargo-miden.
+# miden = "0.10"

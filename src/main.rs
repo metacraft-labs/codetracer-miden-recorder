@@ -55,7 +55,7 @@ enum OutputFormat {
 
 #[derive(Debug, clap::Args)]
 struct RecordArgs {
-    /// Path to the MASM source file (.masm).
+    /// Path to the MASM source file (.masm) or pre-compiled package (.masp).
     program: PathBuf,
 
     /// Directory where the trace files will be written.
@@ -67,6 +67,14 @@ struct RecordArgs {
     /// Output format for the trace data.
     #[arg(short = 'f', long, default_value = "binary")]
     format: OutputFormat,
+
+    /// Treat the input as a pre-compiled .masp package (midenc output).
+    ///
+    /// A .masp file contains a MastForest with embedded DebugInfo produced
+    /// by `cargo miden build`. This flag is currently a placeholder —
+    /// full .masp support requires the midenc toolchain.
+    #[arg(long)]
+    masp: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +101,18 @@ fn main() -> Result<()> {
 
 /// Execute the `record` subcommand.
 fn record(args: RecordArgs) -> Result<()> {
+    // Handle .masp flag early — not yet supported.
+    if args.masp {
+        return Err(eyre::eyre!(
+            "Pre-compiled .masp support requires the midenc/cargo-miden toolchain, \
+             which is not currently available.\n\
+             To record a Rust Miden program:\n  \
+             1. Install cargo-miden: cargo install cargo-miden\n  \
+             2. Build: cargo miden build --release\n  \
+             3. Record the resulting .masp file with this flag"
+        ));
+    }
+
     // 1. Validate the source file exists
     let source_path = args
         .program
