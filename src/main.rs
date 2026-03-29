@@ -53,6 +53,17 @@ enum Commands {
     /// aligned, this operates on a simulated MockChain with synthetic data.
     Contract(ContractArgs),
 
+    /// Replay an on-chain Miden transaction with tracing.
+    ///
+    /// Syncs state from a Miden node (or uses captured TransactionInputs)
+    /// and re-executes a transaction with CodeTracer instrumentation to
+    /// produce a full execution trace.
+    ///
+    /// NOTE: This subcommand currently requires either captured TransactionInputs
+    /// or a compatible miden-client version. See `src/client_replay.rs` for
+    /// known limitations of historical transaction replay.
+    Replay(ReplayArgs),
+
     /// Print version information.
     Version,
 }
@@ -110,6 +121,33 @@ struct RecordArgs {
     masp: bool,
 }
 
+#[derive(Debug, clap::Args)]
+struct ReplayArgs {
+    /// URL of the Miden node's RPC endpoint.
+    #[arg(long)]
+    node_url: String,
+
+    /// Account ID involved in the transaction (hex string, e.g. "0x1234").
+    #[arg(long)]
+    account_id: String,
+
+    /// Transaction ID to replay (hex string).
+    #[arg(long)]
+    transaction_id: String,
+
+    /// Directory where the trace files will be written.
+    #[arg(short = 'o', long, default_value = "./ct-traces/")]
+    out_dir: PathBuf,
+
+    /// Path to captured TransactionInputs JSON file.
+    ///
+    /// If provided, the replay uses these pre-captured inputs instead
+    /// of syncing state from the node. This is the recommended approach
+    /// for reliable replay.
+    #[arg(long)]
+    captured_inputs: Option<PathBuf>,
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -119,6 +157,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Record(args) => record(args),
         Commands::Contract(args) => contract(args),
+        Commands::Replay(args) => replay(args),
         Commands::Version => {
             println!(
                 "codetracer-miden-recorder {}",
@@ -243,6 +282,48 @@ fn contract(args: ContractArgs) -> Result<()> {
     );
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `replay` implementation
+// ---------------------------------------------------------------------------
+
+/// Execute the `replay` subcommand.
+fn replay(args: ReplayArgs) -> Result<()> {
+    use codetracer_miden_recorder::client_replay;
+
+    eprintln!(
+        "Replay: node={}, account={}, tx={}",
+        args.node_url, args.account_id, args.transaction_id
+    );
+
+    let mut config = client_replay::ReplayConfig::new(
+        &args.node_url,
+        &args.account_id,
+        &args.transaction_id,
+        &args.out_dir,
+    );
+
+    if let Some(ref captured_path) = args.captured_inputs {
+        config = config.with_captured_inputs(captured_path);
+        eprintln!(
+            "Using captured inputs from: {}",
+            captured_path.display()
+        );
+    }
+
+    match client_replay::replay_transaction(&config) {
+        Ok(result) => {
+            eprintln!(
+                "Replay completed: block={}, notes={}, output={}",
+                result.block_num,
+                result.input_note_count,
+                result.output_dir.display()
+            );
+            Ok(())
+        }
+        Err(e) => Err(eyre::eyre!("{e}")),
+    }
 }
 
 /// Parse a hex string like "0x1000" or "1000" into a u64.
