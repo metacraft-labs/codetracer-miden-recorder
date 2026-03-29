@@ -4,5 +4,6 @@
 //! into the CodeTracer trace format for debugging and analysis.
 
 pub mod recorder;
+pub mod rust_support;
 pub mod source_map;
 pub mod tracer;
