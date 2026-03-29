@@ -1,11 +1,332 @@
-proc.compute.5
-    push.10 loc_store.0
-    push.32 loc_store.1
-    loc_load.0 loc_load.1 add loc_store.2
-    loc_load.2 dup add loc_store.3
-    loc_load.3 loc_load.0 add loc_store.4
+# Comprehensive MASM test program for CodeTracer Miden recorder.
+# Exercises: procedures, locals, control flow, memory, stack ops,
+# arithmetic, comparisons, and u32 operations.
+
+# ---------------------------------------------------------------------------
+# proc.fibonacci.2 - iterative Fibonacci using locals and a while loop
+# Expects: n on top of stack (must be >= 2)
+# Returns: fib(n) on top of stack
+# Locals: local[0] = a (prev), local[1] = b (current)
+# ---------------------------------------------------------------------------
+proc.fibonacci.2
+    # initialise a=0, b=1
+    push.0 loc_store.0
+    push.1 loc_store.1
+    # n is still on stack; subtract 1 to get loop count
+    push.1 sub
+    # while counter > 0
+    dup push.0 neq
+    while.true
+        # new_b = a + b
+        loc_load.0 loc_load.1 add
+        # a = old b
+        loc_load.1 loc_store.0
+        # b = new_b (already on stack)
+        loc_store.1
+        # decrement counter
+        push.1 sub
+        # loop condition: counter > 0
+        dup push.0 neq
+    end
+    drop
+    loc_load.1
 end
 
+# ---------------------------------------------------------------------------
+# proc.factorial.1 - iterative factorial
+# Expects: n on top of stack
+# Returns: n! on top of stack
+# Local[0] = accumulator
+# ---------------------------------------------------------------------------
+proc.factorial.1
+    push.1 loc_store.0
+    # while n > 1
+    dup push.1 u32gt
+    while.true
+        dup loc_load.0 u32wrapping_mul loc_store.0
+        push.1 sub
+        dup push.1 u32gt
+    end
+    drop
+    loc_load.0
+end
+
+# ---------------------------------------------------------------------------
+# proc.max_of_three.0 - returns max of three u32 values
+# Expects: a b c on stack (c on top)
+# Returns: max(a, b, c)
+# ---------------------------------------------------------------------------
+proc.max_of_three.0
+    # stack: [c, b, a, ...]
+    # compare c and b
+    dup.1 dup.1 u32lt
+    if.true
+        # b > c: drop c, keep b
+        drop
+    else
+        # c >= b: drop b
+        swap drop
+    end
+    # stack: [winner, a, ...]
+    # compare winner and a
+    dup.1 dup.1 u32lt
+    if.true
+        # a > winner: drop winner, keep a
+        drop
+    else
+        # winner >= a: drop a
+        swap drop
+    end
+end
+
+# ---------------------------------------------------------------------------
+# proc.array_sum.3 - store values in memory, then sum them with repeat
+# Uses global memory addresses 100..104
+# Local[0] = base address, local[1] = sum, local[2] = current address
+# Returns: sum on top of stack
+# ---------------------------------------------------------------------------
+proc.array_sum.3
+    push.100 loc_store.0
+
+    # Store 5 values into global memory at addresses 100..104
+    push.10 push.100 mem_store
+    push.20 push.101 mem_store
+    push.30 push.102 mem_store
+    push.40 push.103 mem_store
+    push.50 push.104 mem_store
+
+    # Sum them up
+    push.0 loc_store.1
+    loc_load.0 loc_store.2
+
+    repeat.5
+        loc_load.2 mem_load
+        loc_load.1 add loc_store.1
+        loc_load.2 push.1 add loc_store.2
+    end
+
+    loc_load.1
+end
+
+# ---------------------------------------------------------------------------
+# proc.bitwise_ops.1 - u32 bitwise operations
+# Expects: a b on stack (b on top)
+# Returns: one result on top
+# Local[0] = and_result
+# ---------------------------------------------------------------------------
+proc.bitwise_ops.1
+    dup.1 dup.1
+    u32and loc_store.0
+
+    dup.1 dup.1
+    u32or drop
+
+    u32xor
+
+    # shift operations on the xor result
+    dup push.2 u32shl
+    swap
+    push.1 u32shr
+
+    # leave just the shifted-right result
+    swap drop
+end
+
+# ---------------------------------------------------------------------------
+# proc.stack_manipulation.0 - exercises stack manipulation instructions
+# Expects: at least 4 values on the stack
+# Returns: same number of values as input (exercises ops then undoes)
+# ---------------------------------------------------------------------------
+proc.stack_manipulation.0
+    # dup variants
+    dup.0
+    dup.1
+    dup.2
+    dup.3
+    # clean up the dups
+    drop drop drop drop
+
+    # swap
+    swap
+    swap
+
+    # movup / movdn (using small indices)
+    movup.2
+    movdn.2
+
+    movup.3
+    movdn.3
+
+    # sdepth - push current stack depth
+    sdepth drop
+
+    # padw - push a word of zeros
+    padw
+    # dropw - drop a word
+    dropw
+
+    # conditional swap: push flag=1 then cswap
+    push.1 cswap
+    # undo: push flag=1 then cswap again
+    push.1 cswap
+
+    # conditional drop: need two values + flag
+    dup.1 push.1 cdrop
+    drop
+end
+
+# ---------------------------------------------------------------------------
+# proc.nested_control_flow.1 - nested if/while/repeat
+# Expects: n on stack
+# Returns: result on stack
+# Local[0] = accumulator
+# ---------------------------------------------------------------------------
+proc.nested_control_flow.1
+    push.0 loc_store.0
+
+    # if n > 5
+    dup push.5 u32gt
+    if.true
+        # outer: repeat 3 times
+        repeat.3
+            loc_load.0 push.1 add loc_store.0
+        end
+
+        # inner while: subtract until n <= 5
+        dup push.5 u32gt
+        while.true
+            push.1 sub
+            loc_load.0 push.2 add loc_store.0
+            dup push.5 u32gt
+        end
+    else
+        # n <= 5: add n to accumulator
+        dup loc_load.0 add loc_store.0
+
+        # nested if: is n nonzero?
+        dup push.0 neq
+        if.true
+            loc_load.0 push.10 add loc_store.0
+        else
+            loc_load.0 push.100 add loc_store.0
+        end
+    end
+
+    drop
+    loc_load.0
+end
+
+# ---------------------------------------------------------------------------
+# proc.arithmetic_demo.0 - arithmetic and comparison operations
+# Expects: a b on stack (b on top)
+# Returns: a+b on top
+# ---------------------------------------------------------------------------
+proc.arithmetic_demo.0
+    # stack: [b, a]
+    dup.1 dup.1
+
+    # basic arithmetic: compute a+b
+    add
+    # stack: [a+b, b, a, ...]
+
+    # u32 min/max tests (non-destructive)
+    dup.2 dup.2 u32min drop
+    dup.2 dup.2 u32max drop
+
+    # u32wrapping_add
+    dup.2 dup.2 u32wrapping_add drop
+
+    # comparisons
+    dup.2 dup.2 eq drop
+    dup.2 dup.2 neq drop
+
+    # test equality with zero
+    push.0 eq.0 drop
+
+    # clean up: leave just the sum
+    # stack: [a+b, b, a, ...]
+    swap drop
+    swap drop
+end
+
+# ---------------------------------------------------------------------------
+# proc.memory_word_ops.0 - word-level memory operations
+# Uses global memory address 200
+# Returns: first element of loaded word on top
+# ---------------------------------------------------------------------------
+proc.memory_word_ops.0
+    # store a word [1, 2, 3, 4] at address 200
+    push.4 push.3 push.2 push.1
+    push.200 mem_storew
+    # mem_storew consumes the address but leaves the word on stack
+    dropw
+
+    # load it back
+    padw
+    push.200 mem_loadw
+    # stack: [1, 2, 3, 4, ...]
+    # keep just the top element
+    swap drop
+    swap drop
+    swap drop
+end
+
+# ---------------------------------------------------------------------------
+# Main entry point - calls all procedures and leaves results on the stack
+# ---------------------------------------------------------------------------
 begin
-    exec.compute
+    # 1. Fibonacci(10) = 55
+    push.10
+    exec.fibonacci
+    # stack: [55]
+
+    # 2. Factorial(7) = 5040
+    push.7
+    exec.factorial
+    # stack: [5040, 55]
+
+    # 3. max_of_three(15, 42, 23) = 42
+    push.15 push.42 push.23
+    exec.max_of_three
+    # stack: [42, 5040, 55]
+
+    # 4. array_sum - returns 150 (10+20+30+40+50)
+    exec.array_sum
+    # stack: [150, 42, 5040, 55]
+
+    # 5. bitwise_ops on 0xFF(255) and 0x0F(15)
+    push.255 push.15
+    exec.bitwise_ops
+    # stack: [result, 150, 42, 5040, 55]
+
+    # 6. stack_manipulation - needs 4+ values; we have plenty
+    exec.stack_manipulation
+    # stack unchanged in count
+
+    # 7. nested_control_flow with n=8 (takes > 5 branch)
+    push.8
+    exec.nested_control_flow
+    # stack: [result, ...]
+
+    # 8. nested_control_flow with n=3 (takes <= 5 branch)
+    push.3
+    exec.nested_control_flow
+    # stack: [result, ...]
+
+    # 9. arithmetic_demo with 100 and 25
+    push.100 push.25
+    exec.arithmetic_demo
+    # stack: [125, ...]
+
+    # 10. memory_word_ops
+    exec.memory_word_ops
+    # stack: [1, 125, ...]
+
+    # Clean up: we need at most 16 elements on the stack at end.
+    # We have pushed: 10 results + 16 initial zeros = could be > 16
+    # Drop excess to get down to at most 16
+    # The initial stack has 16 zeros, plus we added ~10 results = 26
+    # Need to drop at least 10 to get to 16
+    drop drop drop drop drop
+    drop drop drop drop drop
 end
