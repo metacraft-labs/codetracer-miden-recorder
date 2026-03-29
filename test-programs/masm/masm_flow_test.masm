@@ -1,0 +1,192 @@
+# Comprehensive MASM flow test program.
+#
+# Exercises: procedures with locals, arithmetic, conditionals, loops,
+# stack manipulation, memory operations, bitwise ops, comparisons,
+# and nested procedure calls.
+
+# --- Bitwise operations procedure ---
+# Performs AND, OR, XOR on two inputs and stores results in locals.
+# Expects two u32 values on the stack.
+# local[0] = a, local[1] = b
+# local[2] = a AND b, local[3] = a OR b, local[4] = a XOR b
+proc.bitwise_ops.5
+    loc_store.1
+    loc_store.0
+    loc_load.0 loc_load.1 u32checked_and loc_store.2
+    loc_load.0 loc_load.1 u32checked_or loc_store.3
+    loc_load.0 loc_load.1 u32checked_xor loc_store.4
+    loc_load.2
+    loc_load.3
+    loc_load.4
+end
+
+# --- Fibonacci procedure ---
+# Computes the N-th Fibonacci number iteratively.
+# Expects N on the stack (must be >= 2).
+# local[0] = N (input count)
+# local[1] = prev (fib[i-2])
+# local[2] = curr (fib[i-1])
+# local[3] = next (fib[i], computed each iteration)
+# local[4] = counter
+proc.fibonacci.5
+    loc_store.0
+    push.0 loc_store.1
+    push.1 loc_store.2
+    push.2 loc_store.4
+    loc_load.4 loc_load.0 lte
+    while.true
+        loc_load.1 loc_load.2 add loc_store.3
+        loc_load.2 loc_store.1
+        loc_load.3 loc_store.2
+        loc_load.4 push.1 add loc_store.4
+        loc_load.4 loc_load.0 lte
+    end
+    loc_load.2
+end
+
+# --- Conditional branch procedure ---
+# Takes a value from the stack. If value > 50, stores value * 2 in local[1],
+# otherwise stores value + 100 in local[1].
+# local[0] = input value
+# local[1] = result (depends on branch taken)
+# local[2] = branch indicator (1 = if-branch, 0 = else-branch)
+proc.conditional_branch.3
+    loc_store.0
+    loc_load.0 push.50 gt
+    if.true
+        loc_load.0 dup add loc_store.1
+        push.1 loc_store.2
+    else
+        loc_load.0 push.100 add loc_store.1
+        push.0 loc_store.2
+    end
+    loc_load.1
+end
+
+# --- Memory operations procedure ---
+# Demonstrates global memory (mem_store/mem_load) and local memory.
+# Stores values at global memory addresses 0, 1, 2, then loads and combines.
+# local[0] = value stored at mem[0]
+# local[1] = value stored at mem[1]
+# local[2] = value loaded from mem[0] + mem[1]
+# local[3] = final combined result
+proc.memory_ops.4
+    push.111 dup mem_store.0 loc_store.0
+    push.222 dup mem_store.1 loc_store.1
+    mem_load.0 mem_load.1 add loc_store.2
+    loc_load.2 push.2 mul loc_store.3
+    loc_load.3
+end
+
+# --- Loop with accumulator procedure ---
+# Sums integers from 1 to N using a while loop.
+# Expects N on the stack.
+# local[0] = N (limit)
+# local[1] = counter (current iteration)
+# local[2] = accumulator (running sum)
+proc.sum_loop.3
+    loc_store.0
+    push.0 loc_store.1
+    push.0 loc_store.2
+    loc_load.1 loc_load.0 lt
+    while.true
+        loc_load.1 push.1 add loc_store.1
+        loc_load.2 loc_load.1 add loc_store.2
+        loc_load.1 loc_load.0 lt
+    end
+    loc_load.2
+end
+
+# --- Stack manipulation helper ---
+# Demonstrates dup, swap, movup, movdn, drop.
+# Takes two values, manipulates, stores results.
+# local[0] = first input
+# local[1] = second input
+# local[2] = first + second (after swap and add)
+# local[3] = result after dup and mul (square of sum)
+proc.stack_manip.4
+    loc_store.1
+    loc_store.0
+    loc_load.0 loc_load.1
+    swap
+    add
+    dup loc_store.2
+    dup mul loc_store.3
+    loc_load.3
+end
+
+# --- Nested call: outer procedure ---
+# Calls fibonacci and conditional_branch, combines results.
+# local[0] = fibonacci result (fib(10) = 55)
+# local[1] = conditional result (55 > 50, so 55 * 2 = 110)
+# local[2] = combined (fib_result + cond_result = 55 + 110 = 165)
+proc.nested_outer.3
+    push.10 exec.fibonacci loc_store.0
+    loc_load.0 exec.conditional_branch loc_store.1
+    loc_load.0 loc_load.1 add loc_store.2
+    loc_load.2
+end
+
+# --- Arithmetic operations procedure ---
+# Demonstrates basic and u32checked arithmetic.
+# local[0] = a, local[1] = b
+# local[2] = a + b
+# local[3] = a * b
+# local[4] = a u32checked_add b (same as add for small values)
+# local[5] = a u32checked_mul b
+proc.arithmetic.6
+    loc_store.1
+    loc_store.0
+    loc_load.0 loc_load.1 add loc_store.2
+    loc_load.0 loc_load.1 mul loc_store.3
+    loc_load.0 loc_load.1 u32checked_add loc_store.4
+    loc_load.0 loc_load.1 u32checked_mul loc_store.5
+    loc_load.2
+end
+
+# --- Comparison operations procedure ---
+# Demonstrates eq, neq, lt, gt, lte, gte.
+# local[0] = a, local[1] = b
+# local[2] = (a eq b), local[3] = (a neq b)
+# local[4] = (a lt b), local[5] = (a gt b)
+proc.comparisons.6
+    loc_store.1
+    loc_store.0
+    loc_load.0 loc_load.1 eq loc_store.2
+    loc_load.0 loc_load.1 neq loc_store.3
+    loc_load.0 loc_load.1 lt loc_store.4
+    loc_load.0 loc_load.1 gt loc_store.5
+    loc_load.2
+end
+
+# --- Entry point ---
+# Calls all procedures sequentially so every code path is exercised.
+# The results are consumed (dropped) to keep the stack clean.
+begin
+    # Arithmetic: 7 + 3 = 10, 7 * 3 = 21
+    push.3 push.7 exec.arithmetic drop
+
+    # Bitwise: 0xFF AND 0x0F = 0x0F, 0xFF OR 0x0F = 0xFF, 0xFF XOR 0x0F = 0xF0
+    push.15 push.255 exec.bitwise_ops drop drop drop
+
+    # Fibonacci(10) = 55
+    push.10 exec.fibonacci drop
+
+    # Conditional with value 75 (> 50, so result = 150)
+    push.75 exec.conditional_branch drop
+
+    # Memory operations
+    exec.memory_ops drop
+
+    # Sum loop: 1 + 2 + ... + 5 = 15
+    push.5 exec.sum_loop drop
+
+    # Stack manipulation: inputs 8, 12 -> sum=20, square=400
+    push.12 push.8 exec.stack_manip drop
+
+    # Nested calls: fib(10)=55, cond(55)=110, combined=165
+    exec.nested_outer drop
+
+    # Comparisons: 10 vs 20
+    push.20 push.10 exec.comparisons drop
+end
