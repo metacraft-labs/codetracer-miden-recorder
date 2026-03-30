@@ -28,3 +28,6 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"
+miden-testing = "0.14"
+miden-protocol = { version = "0.14", features = ["testing"] }
+tokio = { version = "1", features = ["rt", "macros"] }
