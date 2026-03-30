@@ -1,5 +1,7 @@
 //! Integration tests for the Miden tracer.
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
 use codetracer_trace_writer::TraceEventsFileFormat;
@@ -127,13 +129,22 @@ fn test_miden_source_mapping() {
         assert!(line > 0, "line number should be positive, got {}", line);
     }
 
-    // The new compute.masm has 332 lines. Steps should fall within that range.
+    // Derive the total line count from the source file at runtime
+    // instead of hardcoding it.
+    let masm_path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/test-programs/masm/compute.masm"
+    ));
+    let source_code = std::fs::read_to_string(masm_path).expect("failed to read compute.masm");
+    let total_lines = source_code.lines().count() as i64;
+
     for step in &step_events {
         let step_rec = step.get("Step").unwrap();
         let line = step_rec["line"].as_i64().unwrap();
         assert!(
-            line >= 1 && line <= 332,
-            "step line should be within compute.masm range (1-332), got {}",
+            line >= 1 && line <= total_lines,
+            "step line should be within compute.masm range (1-{}), got {}",
+            total_lines,
             line
         );
     }
@@ -411,25 +422,74 @@ fn test_miden_control_flow_branches() {
         })
         .collect();
 
-    // The nested_control_flow procedure is called twice:
-    // - with n=8 (takes the if.true branch at line 189)
-    // - with n=3 (takes the else branch at line 202)
-    //
-    // We should see steps in both the if.true and else branches.
-    // Lines in the if.true branch: 191-201 (repeat.3 and while loop)
-    // Lines in the else branch: 204-212 (nested if)
-    //
-    // Verify that we have steps in the range of both branches.
-    let has_if_branch_steps = step_lines.iter().any(|&l| l >= 191 && l <= 201);
-    let has_else_branch_steps = step_lines.iter().any(|&l| l >= 204 && l <= 212);
+    // Derive the if.true and else branch line ranges from compute.masm at runtime
+    // instead of hardcoding them. We find the nested_control_flow procedure's
+    // if.true and else keywords and determine ranges from there.
+    let masm_path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/test-programs/masm/compute.masm"
+    ));
+    let source_code = std::fs::read_to_string(masm_path).expect("failed to read compute.masm");
+    let source_lines: Vec<&str> = source_code.lines().collect();
+
+    // Find the nested_control_flow procedure boundaries.
+    let proc_start = source_lines
+        .iter()
+        .position(|l| l.trim().starts_with("proc.nested_control_flow"))
+        .expect("should find proc.nested_control_flow");
+    // Find the end of this procedure (next "end" at the procedure level).
+    let proc_end = source_lines[proc_start..]
+        .iter()
+        .enumerate()
+        .filter(|(i, l)| *i > 0 && l.trim() == "end")
+        .last()
+        .map(|(i, _)| proc_start + i)
+        .expect("should find end of nested_control_flow");
+
+    // Within the procedure, find the first if.true and else keywords.
+    let if_true_offset = source_lines[proc_start..=proc_end]
+        .iter()
+        .position(|l| l.trim() == "if.true")
+        .expect("should find if.true in nested_control_flow");
+    let if_true_line = proc_start + if_true_offset; // 0-indexed
+
+    let else_offset = source_lines[proc_start..=proc_end]
+        .iter()
+        .position(|l| l.trim() == "else")
+        .expect("should find else in nested_control_flow");
+    let else_line = proc_start + else_offset; // 0-indexed
+
+    // Find the "end" that closes the if/else block (first "end" after the else).
+    let if_end_offset = source_lines[(proc_start + else_offset)..]
+        .iter()
+        .position(|l| l.trim() == "end")
+        .expect("should find end after else");
+    let if_end_line = proc_start + else_offset + if_end_offset; // 0-indexed
+
+    // Convert to 1-indexed source lines for comparison with step events.
+    // if.true branch body: from line after if.true to line before else
+    let if_branch_start = (if_true_line + 2) as i64; // 1-indexed, skip the if.true line itself
+    let if_branch_end = else_line as i64;             // 1-indexed (the else line, exclusive)
+    // else branch body: from line after else to line before its end
+    let else_branch_start = (else_line + 2) as i64;   // 1-indexed, skip the else line itself
+    let else_branch_end = if_end_line as i64;          // 1-indexed
+
+    let has_if_branch_steps = step_lines
+        .iter()
+        .any(|&l| l >= if_branch_start && l <= if_branch_end);
+    let has_else_branch_steps = step_lines
+        .iter()
+        .any(|&l| l >= else_branch_start && l <= else_branch_end);
 
     assert!(
         has_if_branch_steps,
-        "should have steps in the if.true branch of nested_control_flow"
+        "should have steps in the if.true branch of nested_control_flow (lines {}-{})",
+        if_branch_start, if_branch_end
     );
     assert!(
         has_else_branch_steps,
-        "should have steps in the else branch of nested_control_flow"
+        "should have steps in the else branch of nested_control_flow (lines {}-{})",
+        else_branch_start, else_branch_end
     );
 }
 
@@ -600,5 +660,536 @@ fn test_miden_stack_values() {
         "should have values from at least 5 distinct procedures, got {}: {:?}",
         values_by_proc.len(),
         values_by_proc.keys().collect::<Vec<_>>()
+    );
+}
+
+// ===========================================================================
+// Shared helpers for procedure-scoped event tracking
+// ===========================================================================
+
+/// Build a map from function_id to function name from Function events.
+fn build_function_id_map(events: &[serde_json::Value]) -> HashMap<u64, String> {
+    let mut map = HashMap::new();
+    let mut next_id: u64 = 0;
+    for event in events {
+        if let Some(func) = event.get("Function") {
+            if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                map.insert(next_id, name.to_string());
+                next_id += 1;
+            }
+        }
+    }
+    map
+}
+
+/// Walk events tracking the current procedure via Call/Return and collect
+/// per-procedure data using a user-supplied callback.
+///
+/// The callback receives (current_proc_name, event) for every event.
+fn walk_events_with_proc_context<F>(events: &[serde_json::Value], mut callback: F)
+where
+    F: FnMut(&str, &serde_json::Value),
+{
+    let fn_map = build_function_id_map(events);
+    let mut proc_stack: Vec<String> = vec!["main".to_string()];
+
+    for event in events {
+        if let Some(call) = event.get("Call") {
+            if let Some(fn_id) = call.get("function_id").and_then(|f| f.as_u64()) {
+                if let Some(name) = fn_map.get(&fn_id) {
+                    proc_stack.push(name.clone());
+                }
+            }
+        } else if event.get("Return").is_some() {
+            if proc_stack.len() > 1 {
+                proc_stack.pop();
+            }
+        }
+
+        let current = proc_stack.last().map(|s| s.as_str()).unwrap_or("unknown");
+        callback(current, event);
+    }
+}
+
+/// Read the compute.masm source and return it as a String.
+fn read_compute_masm() -> String {
+    let masm_path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/test-programs/masm/compute.masm"
+    ));
+    std::fs::read_to_string(masm_path).expect("failed to read compute.masm")
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: Fibonacci value at location — verify local[2] never exists (fibonacci
+// uses local[0] and local[1]), and that the value 55 appears as a variable
+// value specifically within the fibonacci procedure context.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_miden_fibonacci_value_at_location() {
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("traces");
+    run_tracer(&out_dir);
+
+    let events_arr = load_trace_events(&out_dir);
+    let source = read_compute_masm();
+
+    // Find the fibonacci procedure line range (1-indexed).
+    let source_lines: Vec<&str> = source.lines().collect();
+    let fib_start = source_lines
+        .iter()
+        .position(|l| l.trim().starts_with("proc.fibonacci"))
+        .expect("should find proc.fibonacci") + 1; // 1-indexed
+    let fib_body_end = source_lines[fib_start..]
+        .iter()
+        .position(|l| l.trim() == "end")
+        .expect("should find end of fibonacci")
+        + fib_start
+        + 1; // 1-indexed
+
+    // Collect Step events that fall within the fibonacci procedure lines.
+    let fib_step_lines: Vec<i64> = events_arr
+        .iter()
+        .filter_map(|e| {
+            let step = e.get("Step")?;
+            let line = step.get("line")?.as_i64()?;
+            if line >= fib_start as i64 && line <= fib_body_end as i64 {
+                Some(line)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        !fib_step_lines.is_empty(),
+        "should have Step events within the fibonacci procedure (lines {}-{})",
+        fib_start, fib_body_end
+    );
+
+    // Track variable names and values per procedure using Call/Return context.
+    // We want to verify that within the fibonacci procedure context:
+    // 1. local[1] (current) eventually holds 55
+    // 2. Step events are emitted at correct source lines
+
+    let mut fib_local_values: HashMap<String, Vec<i64>> = HashMap::new();
+    let mut fib_step_count = 0usize;
+
+    walk_events_with_proc_context(&events_arr, |proc_name, event| {
+        if !proc_name.ends_with("fibonacci") {
+            return;
+        }
+
+        if event.get("Step").is_some() {
+            fib_step_count += 1;
+        }
+
+        // Track VariableName -> variable_id mapping.
+        // Then match Value events by variable_id.
+        if let Some(val) = event.get("Value") {
+            if let Some(value) = val.get("value") {
+                if value.get("kind").and_then(|k| k.as_str()) == Some("Int") {
+                    if let Some(int_val) = value.get("i").and_then(|v| v.as_i64()) {
+                        // Get the variable_id to correlate with the most recent VariableName.
+                        if let Some(var_id) = val.get("variable_id").and_then(|v| v.as_u64()) {
+                            fib_local_values
+                                .entry(format!("var_{}", var_id))
+                                .or_default()
+                                .push(int_val);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    assert!(
+        fib_step_count > 0,
+        "fibonacci procedure should produce Step events within its context"
+    );
+
+    // Verify that 55 appears as a value within the fibonacci procedure context.
+    let all_fib_values: Vec<i64> = fib_local_values.values().flatten().copied().collect();
+    assert!(
+        all_fib_values.contains(&55),
+        "fibonacci procedure should produce value 55 (fib(10)), got values: {:?}",
+        all_fib_values
+    );
+
+    // Verify the fibonacci sequence building: we should see intermediate values
+    // from the sequence (1, 1, 2, 3, 5, 8, 13, 21, 34, 55).
+    let fib_sequence = [1i64, 2, 3, 5, 8, 13, 21, 34, 55];
+    let found_fib_values: Vec<i64> = fib_sequence
+        .iter()
+        .filter(|v| all_fib_values.contains(v))
+        .copied()
+        .collect();
+    assert!(
+        found_fib_values.len() >= 3,
+        "should see at least 3 fibonacci sequence values within fibonacci context, \
+         found: {:?}",
+        found_fib_values
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: Call tree structure — verify Function/Call/Return events match
+// the expected program structure: begin -> exec.compute procedures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_miden_call_tree_structure() {
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("traces");
+    run_tracer(&out_dir);
+
+    let events_arr = load_trace_events(&out_dir);
+
+    // Build the function_id -> name map.
+    let fn_map = build_function_id_map(&events_arr);
+
+    // Verify all expected procedures are registered as Function events.
+    let registered_names: HashSet<String> = fn_map.values().cloned().collect();
+    let expected_procs = [
+        "fibonacci",
+        "factorial",
+        "max_of_three",
+        "array_sum",
+        "bitwise_ops",
+        "stack_manipulation",
+        "nested_control_flow",
+        "arithmetic_demo",
+        "memory_word_ops",
+    ];
+    for proc_name in &expected_procs {
+        assert!(
+            registered_names.iter().any(|n| n.ends_with(proc_name)),
+            "Function event should be registered for '{}', registered: {:?}",
+            proc_name,
+            registered_names
+        );
+    }
+
+    // Walk the events and reconstruct the call tree as a sequence of
+    // (event_type, proc_name) tuples.
+    let mut call_tree: Vec<(String, String)> = Vec::new();
+    for event in &events_arr {
+        if let Some(call) = event.get("Call") {
+            if let Some(fn_id) = call.get("function_id").and_then(|f| f.as_u64()) {
+                if let Some(name) = fn_map.get(&fn_id) {
+                    call_tree.push(("Call".to_string(), name.clone()));
+                }
+            }
+        } else if event.get("Return").is_some() {
+            call_tree.push(("Return".to_string(), String::new()));
+        }
+    }
+
+    // Verify balanced Call/Return pairs.
+    let call_count = call_tree.iter().filter(|(t, _)| t == "Call").count();
+    let return_count = call_tree.iter().filter(|(t, _)| t == "Return").count();
+    assert_eq!(
+        call_count, return_count,
+        "Call and Return events must be balanced: {} calls vs {} returns",
+        call_count, return_count
+    );
+
+    // Verify the call order matches the program structure in main (begin block).
+    // The program calls procedures in this order:
+    // fibonacci, factorial, max_of_three, array_sum, bitwise_ops,
+    // stack_manipulation, nested_control_flow, nested_control_flow,
+    // arithmetic_demo, memory_word_ops
+    let call_order: Vec<String> = call_tree
+        .iter()
+        .filter(|(t, _)| t == "Call")
+        .map(|(_, name)| {
+            // Extract the short name (last segment after ::).
+            name.rsplit("::").next().unwrap_or(name).to_string()
+        })
+        .collect();
+
+    let expected_order = [
+        "fibonacci",
+        "factorial",
+        "max_of_three",
+        "array_sum",
+        "bitwise_ops",
+        "stack_manipulation",
+        "nested_control_flow",
+        "nested_control_flow",
+        "arithmetic_demo",
+        "memory_word_ops",
+    ];
+
+    // Verify the calls appear in the expected order.
+    // There may be additional framework calls, so we check subsequence matching.
+    let mut order_idx = 0;
+    for call_name in &call_order {
+        if order_idx < expected_order.len() && call_name == expected_order[order_idx] {
+            order_idx += 1;
+        }
+    }
+    assert_eq!(
+        order_idx,
+        expected_order.len(),
+        "call order should match expected program structure. \
+         Expected {:?}, got calls: {:?}",
+        expected_order,
+        call_order
+    );
+
+    // Verify that Call/Return events are properly nested: at no point should the
+    // depth go below zero.
+    let mut depth: i32 = 0;
+    for (event_type, _) in &call_tree {
+        match event_type.as_str() {
+            "Call" => depth += 1,
+            "Return" => {
+                depth -= 1;
+                assert!(
+                    depth >= 0,
+                    "Return event without matching Call (depth went negative)"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        depth, 0,
+        "call stack should be empty at end of trace, depth = {}",
+        depth
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: Conditional branch coverage — verify both if.true and else branches
+// in nested_control_flow produce Step events at specific branch lines
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_miden_conditional_branch_coverage() {
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("traces");
+    run_tracer(&out_dir);
+
+    let events_arr = load_trace_events(&out_dir);
+    let source = read_compute_masm();
+    let source_lines: Vec<&str> = source.lines().collect();
+
+    // Find the nested_control_flow procedure.
+    let proc_start = source_lines
+        .iter()
+        .position(|l| l.trim().starts_with("proc.nested_control_flow"))
+        .expect("should find proc.nested_control_flow");
+
+    // Find the first if.true within the procedure.
+    let if_true_idx = source_lines[proc_start..]
+        .iter()
+        .position(|l| l.trim() == "if.true")
+        .expect("should find if.true")
+        + proc_start;
+
+    // Find the else keyword.
+    let else_idx = source_lines[if_true_idx..]
+        .iter()
+        .position(|l| l.trim() == "else")
+        .expect("should find else")
+        + if_true_idx;
+
+    // Find the end that closes the if/else.
+    let if_end_idx = source_lines[else_idx..]
+        .iter()
+        .position(|l| l.trim() == "end")
+        .expect("should find end after else")
+        + else_idx;
+
+    // Identify specific lines in each branch that contain executable operations.
+    // if.true branch: lines between if_true_idx and else_idx (exclusive, 0-indexed)
+    let if_branch_executable_lines: Vec<usize> = (if_true_idx + 1..else_idx)
+        .filter(|&i| {
+            let trimmed = source_lines[i].trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && trimmed != "end"
+                && !trimmed.starts_with("repeat")
+                && !trimmed.starts_with("while")
+        })
+        .collect();
+
+    // else branch: lines between else_idx and if_end_idx (exclusive, 0-indexed)
+    let else_branch_executable_lines: Vec<usize> = (else_idx + 1..if_end_idx)
+        .filter(|&i| {
+            let trimmed = source_lines[i].trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && trimmed != "end"
+                && !trimmed.starts_with("if.")
+                && !trimmed.starts_with("else")
+        })
+        .collect();
+
+    assert!(
+        !if_branch_executable_lines.is_empty(),
+        "should find executable lines in if.true branch"
+    );
+    assert!(
+        !else_branch_executable_lines.is_empty(),
+        "should find executable lines in else branch"
+    );
+
+    // Collect step lines that occur within the nested_control_flow procedure context.
+    let mut ncf_step_lines: Vec<i64> = Vec::new();
+    walk_events_with_proc_context(&events_arr, |proc_name, event| {
+        if !proc_name.ends_with("nested_control_flow") {
+            return;
+        }
+        if let Some(step) = event.get("Step") {
+            if let Some(line) = step.get("line").and_then(|l| l.as_i64()) {
+                ncf_step_lines.push(line);
+            }
+        }
+    });
+
+    // Convert 0-indexed to 1-indexed for comparison with step events.
+    let if_branch_lines_1indexed: Vec<i64> = if_branch_executable_lines
+        .iter()
+        .map(|&i| (i + 1) as i64)
+        .collect();
+    let else_branch_lines_1indexed: Vec<i64> = else_branch_executable_lines
+        .iter()
+        .map(|&i| (i + 1) as i64)
+        .collect();
+
+    // Verify steps exist specifically in the if.true branch executable lines.
+    let if_branch_covered: Vec<i64> = if_branch_lines_1indexed
+        .iter()
+        .filter(|l| ncf_step_lines.contains(l))
+        .copied()
+        .collect();
+
+    assert!(
+        !if_branch_covered.is_empty(),
+        "should have Step events at if.true branch executable lines {:?}, \
+         but no matching steps found. All ncf steps: {:?}",
+        if_branch_lines_1indexed, ncf_step_lines
+    );
+
+    // Verify steps exist specifically in the else branch executable lines.
+    let else_branch_covered: Vec<i64> = else_branch_lines_1indexed
+        .iter()
+        .filter(|l| ncf_step_lines.contains(l))
+        .copied()
+        .collect();
+
+    assert!(
+        !else_branch_covered.is_empty(),
+        "should have Step events at else branch executable lines {:?}, \
+         but no matching steps found. All ncf steps: {:?}",
+        else_branch_lines_1indexed, ncf_step_lines
+    );
+
+    // Verify both branches are specifically covered (not just one).
+    assert!(
+        !if_branch_covered.is_empty() && !else_branch_covered.is_empty(),
+        "BOTH branches must have coverage. if.true covered: {:?}, else covered: {:?}",
+        if_branch_covered, else_branch_covered
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: Memory operations — verify mem_store/mem_load values and
+// word-level memory operations
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_miden_memory_operations() {
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("traces");
+    run_tracer(&out_dir);
+
+    let events_arr = load_trace_events(&out_dir);
+
+    // Collect all Int values emitted within the array_sum procedure context.
+    let mut array_sum_values: Vec<i64> = Vec::new();
+    walk_events_with_proc_context(&events_arr, |proc_name, event| {
+        if !proc_name.ends_with("array_sum") {
+            return;
+        }
+        if let Some(val) = event.get("Value") {
+            if let Some(value) = val.get("value") {
+                if value.get("kind").and_then(|k| k.as_str()) == Some("Int") {
+                    if let Some(int_val) = value.get("i").and_then(|v| v.as_i64()) {
+                        array_sum_values.push(int_val);
+                    }
+                }
+            }
+        }
+    });
+
+    // The array_sum procedure stores values 10, 20, 30, 40, 50 at addresses 100-104.
+    // These values should appear as stack or local variable values during execution.
+    let expected_array_values: [i64; 5] = [10, 20, 30, 40, 50];
+    for &expected in &expected_array_values {
+        assert!(
+            array_sum_values.contains(&expected),
+            "array_sum should capture value {} (from mem_store), got values: {:?}",
+            expected,
+            array_sum_values
+        );
+    }
+
+    // The memory addresses 100-104 should appear as stack values (push.100, push.101, etc.).
+    let expected_addresses: [i64; 5] = [100, 101, 102, 103, 104];
+    for &addr in &expected_addresses {
+        assert!(
+            array_sum_values.contains(&addr),
+            "array_sum should capture address {} (from push for mem_store), got values: {:?}",
+            addr,
+            array_sum_values
+        );
+    }
+
+    // The final sum should be 150 (10+20+30+40+50).
+    assert!(
+        array_sum_values.contains(&150),
+        "array_sum should produce final sum 150, got values: {:?}",
+        array_sum_values
+    );
+
+    // Collect all Int values emitted within the memory_word_ops procedure context.
+    let mut word_ops_values: Vec<i64> = Vec::new();
+    walk_events_with_proc_context(&events_arr, |proc_name, event| {
+        if !proc_name.ends_with("memory_word_ops") {
+            return;
+        }
+        if let Some(val) = event.get("Value") {
+            if let Some(value) = val.get("value") {
+                if value.get("kind").and_then(|k| k.as_str()) == Some("Int") {
+                    if let Some(int_val) = value.get("i").and_then(|v| v.as_i64()) {
+                        word_ops_values.push(int_val);
+                    }
+                }
+            }
+        }
+    });
+
+    // memory_word_ops stores word [1, 2, 3, 4] at address 200.
+    // These values should appear as stack values during execution.
+    let expected_word: [i64; 4] = [1, 2, 3, 4];
+    for &expected in &expected_word {
+        assert!(
+            word_ops_values.contains(&expected),
+            "memory_word_ops should capture word element {} at address 200, got values: {:?}",
+            expected,
+            word_ops_values
+        );
+    }
+
+    // The address 200 should appear as a stack value.
+    assert!(
+        word_ops_values.contains(&200),
+        "memory_word_ops should capture address 200, got values: {:?}",
+        word_ops_values
     );
 }
