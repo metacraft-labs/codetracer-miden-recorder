@@ -490,4 +490,115 @@ fn test_miden_stack_values() {
         int_values.contains(&125),
         "should contain 125 from arithmetic_demo"
     );
+
+    // -----------------------------------------------------------------------
+    // Location-specific assertions: verify each value appears in events
+    // associated with the correct procedure by tracking Call/Return events.
+    // -----------------------------------------------------------------------
+
+    // Step 1: Build a map from function_id to function name using Function events.
+    // Function events are emitted with incrementing IDs starting from 0.
+    let mut function_names_by_id: std::collections::HashMap<u64, String> =
+        std::collections::HashMap::new();
+    let mut next_function_id: u64 = 0;
+    for event in &events_arr {
+        if let Some(func) = event.get("Function") {
+            if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                function_names_by_id.insert(next_function_id, name.to_string());
+                next_function_id += 1;
+            }
+        }
+    }
+
+    // Step 2: Walk through events sequentially, tracking the current procedure
+    // via Call/Return events, and collecting Int values per procedure.
+    let mut current_proc_stack: Vec<String> = vec!["main".to_string()];
+    let mut values_by_proc: std::collections::HashMap<String, Vec<i64>> =
+        std::collections::HashMap::new();
+
+    for event in &events_arr {
+        if let Some(call) = event.get("Call") {
+            if let Some(fn_id) = call.get("function_id").and_then(|f| f.as_u64()) {
+                if let Some(name) = function_names_by_id.get(&fn_id) {
+                    current_proc_stack.push(name.clone());
+                }
+            }
+        } else if event.get("Return").is_some() {
+            if current_proc_stack.len() > 1 {
+                current_proc_stack.pop();
+            }
+        } else if let Some(val) = event.get("Value") {
+            if let Some(value) = val.get("value") {
+                if value.get("kind").and_then(|k| k.as_str()) == Some("Int") {
+                    if let Some(int_val) = value.get("i").and_then(|v| v.as_i64()) {
+                        let proc_name = current_proc_stack
+                            .last()
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        values_by_proc
+                            .entry(proc_name)
+                            .or_default()
+                            .push(int_val);
+                    }
+                }
+            }
+        }
+    }
+
+    // Helper: check if a procedure (by name suffix) produced a given value.
+    let proc_has_value = |proc_suffix: &str, val: i64| -> bool {
+        values_by_proc.iter().any(|(name, vals)| {
+            name.ends_with(proc_suffix) && vals.contains(&val)
+        })
+    };
+
+    // Verify that 55 (fib(10)) appears specifically in fibonacci procedure events.
+    assert!(
+        proc_has_value("fibonacci", 55),
+        "value 55 should appear in fibonacci procedure events, but was not found. \
+         Procedures with values: {:?}",
+        values_by_proc.keys().collect::<Vec<_>>()
+    );
+
+    // Verify that 5040 (7!) appears specifically in factorial procedure events.
+    assert!(
+        proc_has_value("factorial", 5040),
+        "value 5040 should appear in factorial procedure events, but was not found. \
+         Procedures with values: {:?}",
+        values_by_proc.keys().collect::<Vec<_>>()
+    );
+
+    // Verify that 42 appears specifically in max_of_three procedure events.
+    assert!(
+        proc_has_value("max_of_three", 42),
+        "value 42 should appear in max_of_three procedure events, but was not found. \
+         Procedures with values: {:?}",
+        values_by_proc.keys().collect::<Vec<_>>()
+    );
+
+    // Verify that 10 appears specifically in array_sum procedure events
+    // (it stores 10 as the first array element).
+    assert!(
+        proc_has_value("array_sum", 10),
+        "value 10 should appear in array_sum procedure events, but was not found. \
+         Procedures with values: {:?}",
+        values_by_proc.keys().collect::<Vec<_>>()
+    );
+
+    // Verify that 125 appears specifically in arithmetic_demo procedure events.
+    assert!(
+        proc_has_value("arithmetic_demo", 125),
+        "value 125 should appear in arithmetic_demo procedure events, but was not found. \
+         Procedures with values: {:?}",
+        values_by_proc.keys().collect::<Vec<_>>()
+    );
+
+    // Verify we tracked at least 5 distinct procedures that produced values,
+    // confirming the procedure-level tracking is working.
+    assert!(
+        values_by_proc.len() >= 5,
+        "should have values from at least 5 distinct procedures, got {}: {:?}",
+        values_by_proc.len(),
+        values_by_proc.keys().collect::<Vec<_>>()
+    );
 }
