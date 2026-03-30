@@ -37,6 +37,7 @@ impl MidenTracer {
     ) -> Result<()> {
         // -- 1. Assemble in debug mode -----------------------------------------------
         let assembler = Assembler::default().with_debug_mode(true);
+        let source_manager = assembler.source_manager();
         let program = assembler
             .assemble_program(source_path.to_path_buf())
             .map_err(|e| eyre!("assembly failed: {e}"))?;
@@ -44,7 +45,7 @@ impl MidenTracer {
         // -- 2. Execute with iterator -------------------------------------------------
         let stack_inputs = StackInputs::default();
         let mut host = DefaultHost::default();
-        let vm_state_iter = execute_iter(&program, stack_inputs, &mut host);
+        let vm_state_iter = execute_iter(&program, stack_inputs, &mut host, source_manager);
 
         // -- 3. Build source map for byte-offset -> line mapping ----------------------
         let source_map = SourceMap::from_source(source_path, source_code);
@@ -224,9 +225,10 @@ impl MidenTracer {
                 for &slot in active_locals.keys() {
                     let offset = current_num_locals as u64 - slot as u64;
                     if fmp >= offset {
-                        let addr = fmp - offset;
+                        let addr = (fmp - offset) as u32;
+                        let target_addr = miden_processor::MemoryAddress::from(addr);
                         if let Some(&(_, felt_val)) =
-                            state.memory.iter().find(|(a, _)| *a == addr)
+                            state.memory.iter().find(|(a, _)| *a == target_addr)
                         {
                             let int_val = felt_val.as_int() as i64;
                             let name = format!("local[{}]", slot);
