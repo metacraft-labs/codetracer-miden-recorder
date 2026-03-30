@@ -12,9 +12,9 @@ codetracer_trace_types = "0.16"
 codetracer_trace_writer = "0.17"
 
 # Miden VM
-miden-processor = "0.13"
-miden-assembly = "0.13"
-miden-core = "0.13"
+miden-processor = "0.14"
+miden-assembly = "0.14"
+miden-core = "0.14"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
