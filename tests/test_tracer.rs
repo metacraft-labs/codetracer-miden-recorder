@@ -43,8 +43,54 @@ fn test_miden_tracer_basic_execution() {
     let out_dir = tmp_dir.path().join("traces");
     run_tracer(&out_dir);
 
-    // If we got here, execution succeeded.
+    // Verify the output directory and all three output files exist.
     assert!(out_dir.exists(), "output directory should exist");
+    assert!(
+        out_dir.join("trace.bin").exists(),
+        "trace.bin should exist"
+    );
+    assert!(
+        out_dir.join("trace_metadata.json").exists(),
+        "trace_metadata.json should exist"
+    );
+    assert!(
+        out_dir.join("trace_paths.json").exists(),
+        "trace_paths.json should exist"
+    );
+
+    // trace.bin should be non-empty.
+    let trace_size = std::fs::metadata(out_dir.join("trace.bin"))
+        .expect("trace.bin metadata")
+        .len();
+    assert!(trace_size > 0, "trace.bin should be non-empty");
+
+    // trace_metadata.json should be valid JSON with a "program" field.
+    let metadata_content =
+        std::fs::read_to_string(out_dir.join("trace_metadata.json")).expect("failed to read");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&metadata_content).expect("trace_metadata.json should be valid JSON");
+    assert!(
+        metadata.get("program").is_some(),
+        "metadata should have 'program' field"
+    );
+
+    // trace_paths.json should be a valid JSON array.
+    let paths_content =
+        std::fs::read_to_string(out_dir.join("trace_paths.json")).expect("failed to read");
+    let paths: serde_json::Value =
+        serde_json::from_str(&paths_content).expect("trace_paths.json should be valid JSON");
+    assert!(paths.is_array(), "paths should be a JSON array");
+
+    // The trace should contain Step events (i.e., execution was actually recorded).
+    let events_arr = load_trace_events(&out_dir);
+    let step_count = events_arr
+        .iter()
+        .filter(|e| e.get("Step").is_some())
+        .count();
+    assert!(
+        step_count > 0,
+        "trace should contain at least one Step event, got none"
+    );
 }
 
 // ---------------------------------------------------------------------------
