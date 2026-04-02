@@ -70,6 +70,7 @@ fn test_record_creates_trace_files() {
     );
 
     // Verify the three trace output files exist.
+    // The CLI defaults to binary format, so the events file is trace.bin.
     assert!(
         out_dir.join("trace.bin").exists(),
         "trace.bin should exist in output directory"

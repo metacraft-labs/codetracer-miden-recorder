@@ -25,7 +25,7 @@ fn run_tracer(out_dir: &Path) {
 
 /// Helper: parse the trace events JSON from the output directory.
 fn load_trace_events(out_dir: &Path) -> Vec<serde_json::Value> {
-    let events_path = out_dir.join("trace.bin");
+    let events_path = out_dir.join("trace.json");
     let content = std::fs::read_to_string(&events_path).expect("failed to read trace events");
     let events: serde_json::Value =
         serde_json::from_str(&content).expect("trace events should be valid JSON");
@@ -48,8 +48,8 @@ fn test_miden_tracer_basic_execution() {
     // Verify the output directory and all three output files exist.
     assert!(out_dir.exists(), "output directory should exist");
     assert!(
-        out_dir.join("trace.bin").exists(),
-        "trace.bin should exist"
+        out_dir.join("trace.json").exists(),
+        "trace.json should exist"
     );
     assert!(
         out_dir.join("trace_metadata.json").exists(),
@@ -60,11 +60,11 @@ fn test_miden_tracer_basic_execution() {
         "trace_paths.json should exist"
     );
 
-    // trace.bin should be non-empty.
-    let trace_size = std::fs::metadata(out_dir.join("trace.bin"))
-        .expect("trace.bin metadata")
+    // trace.json should be non-empty.
+    let trace_size = std::fs::metadata(out_dir.join("trace.json"))
+        .expect("trace.json metadata")
         .len();
-    assert!(trace_size > 0, "trace.bin should be non-empty");
+    assert!(trace_size > 0, "trace.json should be non-empty");
 
     // trace_metadata.json should be valid JSON with a "program" field.
     let metadata_content =
@@ -231,7 +231,7 @@ fn test_miden_variable_extraction() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Three-file output - trace.bin, trace_metadata.json, trace_paths.json
+// Test 4: Three-file output - trace.json, trace_metadata.json, trace_paths.json
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -241,8 +241,8 @@ fn test_miden_trace_3file_output() {
     run_tracer(&out_dir);
 
     assert!(
-        out_dir.join("trace.bin").exists(),
-        "trace.bin should exist"
+        out_dir.join("trace.json").exists(),
+        "trace.json should exist"
     );
     assert!(
         out_dir.join("trace_metadata.json").exists(),
@@ -274,11 +274,11 @@ fn test_miden_trace_3file_output() {
         "paths should not be empty"
     );
 
-    // trace.bin should be non-empty.
-    let trace_size = std::fs::metadata(out_dir.join("trace.bin"))
-        .expect("trace.bin metadata")
+    // trace.json should be non-empty.
+    let trace_size = std::fs::metadata(out_dir.join("trace.json"))
+        .expect("trace.json metadata")
         .len();
-    assert!(trace_size > 0, "trace.bin should be non-empty");
+    assert!(trace_size > 0, "trace.json should be non-empty");
 }
 
 // ---------------------------------------------------------------------------
