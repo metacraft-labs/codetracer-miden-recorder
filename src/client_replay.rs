@@ -331,21 +331,12 @@ impl BlockHeader {
 /// Authentication path for block inclusion in the chain MMR.
 ///
 /// Mirrors `PartialBlockchain` (or `ChainMmr`) from miden-base.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialBlockchain {
     /// MMR peaks.
     pub peaks: Vec<Digest>,
     /// Authentication path nodes.
     pub auth_nodes: Vec<(u64, Digest)>,
-}
-
-impl Default for PartialBlockchain {
-    fn default() -> Self {
-        Self {
-            peaks: Vec::new(),
-            auth_nodes: Vec::new(),
-        }
-    }
 }
 
 /// A single input note for transaction execution.
@@ -366,7 +357,7 @@ pub struct InputNote {
 }
 
 /// Metadata for a note.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NoteMetadata {
     /// Note type tag.
     pub tag: u32,
@@ -374,16 +365,6 @@ pub struct NoteMetadata {
     pub aux: u64,
     /// Note type (0 = public, 1 = private, 2 = encrypted).
     pub note_type: u8,
-}
-
-impl Default for NoteMetadata {
-    fn default() -> Self {
-        Self {
-            tag: 0,
-            aux: 0,
-            note_type: 0,
-        }
-    }
 }
 
 /// Collection of input notes for a transaction.
