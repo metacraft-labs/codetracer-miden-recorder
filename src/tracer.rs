@@ -256,10 +256,12 @@ impl MidenTracer {
             TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
         }
 
-        // Emit a return for the initial function call (always emitted at start).
-        if prev_context_name.is_some() {
-            TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
-        }
+        // Emit the Return that closes the <toplevel> Call opened by start().
+        // This must be unconditional: even if no VM states produced assembly
+        // ops (empty program), the toplevel Call still needs to be closed.
+        // Without it the db-backend crashes when step-over tries to find
+        // the end of depth 0.
+        TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
 
         Ok(())
     }
