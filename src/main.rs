@@ -159,10 +159,7 @@ fn main() -> Result<()> {
         Commands::Contract(args) => contract(args),
         Commands::Replay(args) => replay(args),
         Commands::Version => {
-            println!(
-                "codetracer-miden-recorder {}",
-                env!("CARGO_PKG_VERSION")
-            );
+            println!("codetracer-miden-recorder {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
     }
@@ -273,7 +270,10 @@ fn contract(args: ContractArgs) -> Result<()> {
         .map_err(|e| eyre::eyre!(e))?;
 
     let summary_path = session.finalize().map_err(|e| eyre::eyre!(e))?;
-    eprintln!("Contract trace summary written to {}", summary_path.display());
+    eprintln!(
+        "Contract trace summary written to {}",
+        summary_path.display()
+    );
 
     eprintln!(
         "NOTE: This is a simulated MockChain trace. Real contract tracing requires \
@@ -306,10 +306,7 @@ fn replay(args: ReplayArgs) -> Result<()> {
 
     if let Some(ref captured_path) = args.captured_inputs {
         config = config.with_captured_inputs(captured_path);
-        eprintln!(
-            "Using captured inputs from: {}",
-            captured_path.display()
-        );
+        eprintln!("Using captured inputs from: {}", captured_path.display());
     }
 
     match client_replay::replay_transaction(&config) {

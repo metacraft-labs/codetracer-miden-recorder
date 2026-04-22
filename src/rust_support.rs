@@ -113,9 +113,18 @@ mod tests {
 
     #[test]
     fn test_source_language_detection() {
-        assert_eq!(SourceLanguage::from_path("compute.masm"), SourceLanguage::Masm);
-        assert_eq!(SourceLanguage::from_path("/path/to/lib.rs"), SourceLanguage::Rust);
-        assert_eq!(SourceLanguage::from_path("program.move"), SourceLanguage::Unknown);
+        assert_eq!(
+            SourceLanguage::from_path("compute.masm"),
+            SourceLanguage::Masm
+        );
+        assert_eq!(
+            SourceLanguage::from_path("/path/to/lib.rs"),
+            SourceLanguage::Rust
+        );
+        assert_eq!(
+            SourceLanguage::from_path("program.move"),
+            SourceLanguage::Unknown
+        );
         assert_eq!(SourceLanguage::from_path(""), SourceLanguage::Unknown);
         assert_eq!(
             SourceLanguage::from_path("/home/user/project/src/main.rs"),

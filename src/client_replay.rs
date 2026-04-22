@@ -724,9 +724,7 @@ impl DataStore for ReplayDataStore {
         self.foreign_accounts
             .get(&account_id)
             .cloned()
-            .ok_or_else(|| {
-                ReplayError::ForeignAccountNotFound(format!("0x{account_id:x}"))
-            })
+            .ok_or_else(|| ReplayError::ForeignAccountNotFound(format!("0x{account_id:x}")))
     }
 }
 
@@ -1081,9 +1079,7 @@ mod tests {
         assert_eq!(err.to_string(), "invalid config: bad");
 
         let err = ReplayError::HistoricalReplayNotSupported("reason".to_string());
-        assert!(err
-            .to_string()
-            .contains("historical replay not supported"));
+        assert!(err.to_string().contains("historical replay not supported"));
     }
 
     #[test]

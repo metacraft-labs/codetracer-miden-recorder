@@ -8,10 +8,10 @@ use std::path::Path;
 
 use codetracer_trace_types::{Line, TypeKind, ValueRecord, NONE_VALUE};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
-use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
-use eyre::{Context, Result, eyre};
+use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
+use eyre::{eyre, Context, Result};
 use miden_assembly::Assembler;
-use miden_processor::{AsmOpInfo, DefaultHost, StackInputs, VmState, execute_iter};
+use miden_processor::{execute_iter, AsmOpInfo, DefaultHost, StackInputs, VmState};
 
 use crate::source_map::SourceMap;
 
@@ -63,7 +63,9 @@ impl MidenTracer {
 
         let events_filename = match format {
             TraceEventsFileFormat::Json => "trace.json",
-            TraceEventsFileFormat::Binary | TraceEventsFileFormat::BinaryV0 | TraceEventsFileFormat::Ctfs => "trace.bin",
+            TraceEventsFileFormat::Binary
+            | TraceEventsFileFormat::BinaryV0
+            | TraceEventsFileFormat::Ctfs => "trace.bin",
         };
         let events_path = out_dir.join(events_filename);
         let metadata_path = out_dir.join("trace_metadata.json");
@@ -80,20 +82,17 @@ impl MidenTracer {
         TraceWriter::start(&mut *tracer.writer, source_path, Line(1));
 
         // Register the "felt" type (after start, so that "None" gets TypeId(0)).
-        let felt_type_id =
-            TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Int, "felt");
+        let felt_type_id = TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Int, "felt");
         tracer.felt_type_id = Some(felt_type_id);
 
         // -- 7. Walk VM states --------------------------------------------------------
         tracer.process_vm_states(vm_state_iter, &source_map, source_path)?;
 
         // -- 8. Finish writing --------------------------------------------------------
-        TraceWriter::finish_writing_trace_events(&mut *tracer.writer)
-            .map_err(|e| eyre!("{e}"))?;
+        TraceWriter::finish_writing_trace_events(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
         TraceWriter::finish_writing_trace_metadata(&mut *tracer.writer)
             .map_err(|e| eyre!("{e}"))?;
-        TraceWriter::finish_writing_trace_paths(&mut *tracer.writer)
-            .map_err(|e| eyre!("{e}"))?;
+        TraceWriter::finish_writing_trace_paths(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
 
         Ok(())
     }
@@ -190,11 +189,7 @@ impl MidenTracer {
 
             // -- Emit step if line changed -----------------------------------------------
             if prev_line != Some(line) {
-                TraceWriter::register_step(
-                    &mut *self.writer,
-                    source_path,
-                    Line(line as i64),
-                );
+                TraceWriter::register_step(&mut *self.writer, source_path, Line(line as i64));
                 prev_line = Some(line);
             }
 
@@ -214,11 +209,7 @@ impl MidenTracer {
                     i: int_val,
                     type_id: felt_type_id,
                 };
-                TraceWriter::register_variable_with_full_value(
-                    &mut *self.writer,
-                    &name,
-                    value,
-                );
+                TraceWriter::register_variable_with_full_value(&mut *self.writer, &name, value);
             }
 
             // -- Emit local memory slot values -------------------------------------------
