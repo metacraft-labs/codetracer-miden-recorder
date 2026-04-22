@@ -28,13 +28,57 @@ impl MidenTracer {
     /// 1. Assembles the MASM source in debug mode.
     /// 2. Executes with `execute_iter` to step through VM states.
     /// 3. Emits Step / Call / Return / Variable events.
-    /// 4. Writes trace.json/trace.bin (depending on format), trace_metadata.json, trace_paths.json.
+    /// 4. Writes a `.ct` container file to `out_dir`.
     pub fn trace_program(
         source_path: &Path,
         source_code: &str,
         out_dir: &Path,
         format: TraceEventsFileFormat,
     ) -> Result<()> {
+        let program_str = source_path.to_string_lossy();
+        let writer = create_trace_writer(&program_str, &[], format);
+
+        // Initialise output files.
+        std::fs::create_dir_all(out_dir)
+            .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
+
+        let events_filename = match format {
+            TraceEventsFileFormat::Json => "trace.json",
+            TraceEventsFileFormat::Binary | TraceEventsFileFormat::BinaryV0 | TraceEventsFileFormat::Ctfs => "trace.bin",
+        };
+        let events_path = out_dir.join(events_filename);
+        let metadata_path = out_dir.join("trace_metadata.json");
+        let paths_path = out_dir.join("trace_paths.json");
+
+        Self::trace_program_with_writer(source_path, source_code, writer, |w| {
+            TraceWriter::begin_writing_trace_events(w, &events_path)
+                .map_err(|e| eyre!("{e}"))?;
+            TraceWriter::begin_writing_trace_metadata(w, &metadata_path)
+                .map_err(|e| eyre!("{e}"))?;
+            TraceWriter::begin_writing_trace_paths(w, &paths_path)
+                .map_err(|e| eyre!("{e}"))?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Trace a MASM program using the provided writer.
+    ///
+    /// The `begin_fn` callback is invoked after writer creation to set up
+    /// output streams (begin_writing_*). For file-backed writers this opens
+    /// the output files; for in-memory test writers it can be a no-op.
+    ///
+    /// After tracing completes, the writer's finish and close methods are
+    /// called automatically.
+    pub fn trace_program_with_writer<F>(
+        source_path: &Path,
+        source_code: &str,
+        writer: Box<dyn TraceWriter + Send>,
+        begin_fn: F,
+    ) -> Result<Box<dyn TraceWriter + Send>>
+    where
+        F: FnOnce(&mut (dyn TraceWriter + Send)) -> Result<()>,
+    {
         // -- 1. Assemble in debug mode -----------------------------------------------
         let assembler = Assembler::default().with_debug_mode(true);
         let source_manager = assembler.source_manager();
@@ -50,33 +94,14 @@ impl MidenTracer {
         // -- 3. Build source map for byte-offset -> line mapping ----------------------
         let source_map = SourceMap::from_source(source_path, source_code);
 
-        // -- 4. Create the trace writer -----------------------------------------------
-        let program_str = source_path.to_string_lossy();
+        // -- 4. Set up the tracer with the provided writer ----------------------------
         let mut tracer = MidenTracer {
-            writer: create_trace_writer(&program_str, &[], format),
+            writer,
             felt_type_id: None,
         };
 
-        // -- 5. Initialise output files -----------------------------------------------
-        std::fs::create_dir_all(out_dir)
-            .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
-
-        let events_filename = match format {
-            TraceEventsFileFormat::Json => "trace.json",
-            TraceEventsFileFormat::Binary
-            | TraceEventsFileFormat::BinaryV0
-            | TraceEventsFileFormat::Ctfs => "trace.bin",
-        };
-        let events_path = out_dir.join(events_filename);
-        let metadata_path = out_dir.join("trace_metadata.json");
-        let paths_path = out_dir.join("trace_paths.json");
-
-        TraceWriter::begin_writing_trace_events(&mut *tracer.writer, &events_path)
-            .map_err(|e| eyre!("{e}"))?;
-        TraceWriter::begin_writing_trace_metadata(&mut *tracer.writer, &metadata_path)
-            .map_err(|e| eyre!("{e}"))?;
-        TraceWriter::begin_writing_trace_paths(&mut *tracer.writer, &paths_path)
-            .map_err(|e| eyre!("{e}"))?;
+        // -- 5. Initialise output streams via callback --------------------------------
+        begin_fn(&mut *tracer.writer)?;
 
         // -- 6. Start the trace (must be called before registering any types) -----------
         TraceWriter::start(&mut *tracer.writer, source_path, Line(1));
@@ -93,8 +118,9 @@ impl MidenTracer {
         TraceWriter::finish_writing_trace_metadata(&mut *tracer.writer)
             .map_err(|e| eyre!("{e}"))?;
         TraceWriter::finish_writing_trace_paths(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
+        TraceWriter::close(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
 
-        Ok(())
+        Ok(tracer.writer)
     }
 
     /// Walk the VM state iterator, emitting trace events.
