@@ -569,12 +569,7 @@ impl ExecutionContextTracker {
     /// If the context has not been seen before, it is registered with the
     /// given kind. If the context ID matches the current context, this is
     /// a no-op.
-    pub fn switch_context(
-        &mut self,
-        context_id: ContextId,
-        kind: ContextKind,
-        clock_cycle: u64,
-    ) {
+    pub fn switch_context(&mut self, context_id: ContextId, kind: ContextKind, clock_cycle: u64) {
         if self.current_context == Some(context_id) {
             // Already in this context; just increment the cycle count.
             if let Some(info) = self.contexts.get_mut(&context_id) {
@@ -727,9 +722,7 @@ pub enum TraceEvent {
         context_id: ContextId,
     },
     /// A function return.
-    Return {
-        context_id: ContextId,
-    },
+    Return { context_id: ContextId },
     /// A variable value.
     Variable {
         name: String,
@@ -760,10 +753,7 @@ impl ContractTraceSession {
     /// Build the MockChain from the configuration.
     pub fn build_chain(&mut self) -> Result<(), String> {
         if self.status != SessionStatus::Created {
-            return Err(format!(
-                "Cannot build chain in state {:?}",
-                self.status
-            ));
+            return Err(format!("Cannot build chain in state {:?}", self.status));
         }
 
         let builder = MockChainBuilder::new();
@@ -850,17 +840,13 @@ impl ContractTraceSession {
             let note_ctx = ContextId((i + 1) as u32);
             self.context_tracker.switch_context(
                 note_ctx,
-                ContextKind::NoteScript {
-                    note_id: *note_id,
-                },
+                ContextKind::NoteScript { note_id: *note_id },
                 clock,
             );
             self.trace_events.push(TraceEvent::ContextSwitch {
                 from: Some(kernel_ctx),
                 to: note_ctx,
-                kind: ContextKind::NoteScript {
-                    note_id: *note_id,
-                },
+                kind: ContextKind::NoteScript { note_id: *note_id },
             });
             self.trace_events.push(TraceEvent::Call {
                 function_name: format!("note_script_{}", note_id.0),
@@ -903,9 +889,7 @@ impl ContractTraceSession {
             // Return to note context.
             self.context_tracker.switch_context(
                 note_ctx,
-                ContextKind::NoteScript {
-                    note_id: *note_id,
-                },
+                ContextKind::NoteScript { note_id: *note_id },
                 clock,
             );
             self.trace_events.push(TraceEvent::Return {
@@ -1024,10 +1008,7 @@ impl ContractTraceSession {
     /// on the MidenTracer. Currently it writes a summary JSON file.
     pub fn finalize(&mut self) -> Result<PathBuf, String> {
         if self.status != SessionStatus::Executed {
-            return Err(format!(
-                "Cannot finalize in state {:?}",
-                self.status
-            ));
+            return Err(format!("Cannot finalize in state {:?}", self.status));
         }
 
         std::fs::create_dir_all(&self.out_dir)
@@ -1037,8 +1018,7 @@ impl ContractTraceSession {
         let summary_path = self.out_dir.join("contract_trace_summary.json");
         let json = serde_json::to_string_pretty(&summary)
             .map_err(|e| format!("JSON serialization failed: {e}"))?;
-        std::fs::write(&summary_path, json)
-            .map_err(|e| format!("Failed to write summary: {e}"))?;
+        std::fs::write(&summary_path, json).map_err(|e| format!("Failed to write summary: {e}"))?;
 
         self.status = SessionStatus::Completed;
         Ok(summary_path)

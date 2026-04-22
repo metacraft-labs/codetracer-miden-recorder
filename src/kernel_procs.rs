@@ -54,7 +54,9 @@ pub struct KernelProcInfo {
 /// assert!(!is_kernel_procedure("my_contract::transfer"));
 /// ```
 pub fn is_kernel_procedure(name: &str) -> bool {
-    KERNEL_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+    KERNEL_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }
 
 /// Extract information about a kernel procedure from its name.
@@ -101,7 +103,9 @@ mod tests {
 
     #[test]
     fn test_is_kernel_procedure_known_prefixes() {
-        assert!(is_kernel_procedure("miden::kernel::account_vault_add_asset"));
+        assert!(is_kernel_procedure(
+            "miden::kernel::account_vault_add_asset"
+        ));
         assert!(is_kernel_procedure("miden::kernel::get_account_id"));
         assert!(is_kernel_procedure("kernel::some_proc"));
         assert!(is_kernel_procedure("miden::account::get_id"));
