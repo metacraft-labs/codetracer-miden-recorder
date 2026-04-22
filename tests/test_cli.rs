@@ -69,38 +69,41 @@ fn test_record_creates_trace_files() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Verify the three trace output files exist.
-    // The CLI defaults to binary format, so the events file is trace.bin.
+    // The Nim trace writer with Binary format produces a .ct container file.
+    // Find *.ct files in the output directory.
+    let ct_files: Vec<_> = std::fs::read_dir(&out_dir)
+        .expect("failed to read output directory")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("ct") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
     assert!(
-        out_dir.join("trace.bin").exists(),
-        "trace.bin should exist in output directory"
-    );
-    assert!(
-        out_dir.join("trace_metadata.json").exists(),
-        "trace_metadata.json should exist in output directory"
-    );
-    assert!(
-        out_dir.join("trace_paths.json").exists(),
-        "trace_paths.json should exist in output directory"
+        !ct_files.is_empty(),
+        "should produce at least one .ct file in output directory, found: {:?}",
+        std::fs::read_dir(&out_dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect::<Vec<_>>()
     );
 
-    // Verify trace_metadata.json is valid JSON with expected fields.
-    let metadata_content =
-        std::fs::read_to_string(out_dir.join("trace_metadata.json")).expect("failed to read metadata");
-    let metadata: serde_json::Value =
-        serde_json::from_str(&metadata_content).expect("trace_metadata.json should be valid JSON");
+    // Verify the .ct file has the CTFS magic bytes: C0 DE 72 AC E2
+    let ct_data = std::fs::read(&ct_files[0]).expect("failed to read .ct file");
     assert!(
-        metadata["program"].as_str().unwrap().contains("compute.masm"),
-        "metadata should reference the source program"
+        ct_data.len() >= 5,
+        ".ct file should have at least 5 bytes for the magic header"
     );
-
-    // Verify trace_paths.json is valid JSON listing the source file.
-    let paths_content =
-        std::fs::read_to_string(out_dir.join("trace_paths.json")).expect("failed to read paths");
-    let paths: serde_json::Value =
-        serde_json::from_str(&paths_content).expect("trace_paths.json should be valid JSON");
-    assert!(
-        paths.as_array().unwrap().len() >= 1,
-        "trace_paths.json should list at least one path"
+    let ctfs_magic: [u8; 5] = [0xC0, 0xDE, 0x72, 0xAC, 0xE2];
+    assert_eq!(
+        &ct_data[..5],
+        &ctfs_magic,
+        ".ct file should start with CTFS magic bytes (C0 DE 72 AC E2), got {:02X?}",
+        &ct_data[..5]
     );
 }
