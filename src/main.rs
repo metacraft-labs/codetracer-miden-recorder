@@ -9,7 +9,7 @@
 //! ```text
 //! codetracer-miden-recorder record <masm-file> \
 //!     --out-dir <output-dir> \
-//!     [--format binary|json]
+//!     [--format ctfs|binary|json]
 //! ```
 
 use std::path::PathBuf;
@@ -68,10 +68,46 @@ enum Commands {
     Version,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+/// Trace output container format.
+///
+/// The canonical CodeTracer pipeline (Nim `ct_reader_*` FFI and the
+/// db-backend's `CTFSTraceReader`) consumes the multi-stream `Ctfs`
+/// container directly. The other variants are kept for parity with
+/// other recorders and for debugging:
+///
+/// * `Ctfs` — recommended; canonical multi-stream `.ct` container.
+/// * `Binary` — legacy CBOR + Zstd binary format.
+/// * `Json` — human-readable JSON (slower; useful for inspection).
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
+    /// Canonical CodeTracer multi-stream container (recommended).
+    Ctfs,
+    /// Legacy CBOR + Zstd binary format.
     Binary,
+    /// Human-readable JSON (slower; useful for debugging).
     Json,
+}
+
+impl OutputFormat {
+    /// Stable lowercase name for the format, suitable for JSON metadata.
+    #[allow(dead_code)]
+    fn as_str(self) -> &'static str {
+        match self {
+            OutputFormat::Ctfs => "ctfs",
+            OutputFormat::Binary => "binary",
+            OutputFormat::Json => "json",
+        }
+    }
+}
+
+impl From<OutputFormat> for TraceEventsFileFormat {
+    fn from(fmt: OutputFormat) -> Self {
+        match fmt {
+            OutputFormat::Ctfs => TraceEventsFileFormat::Ctfs,
+            OutputFormat::Binary => TraceEventsFileFormat::Binary,
+            OutputFormat::Json => TraceEventsFileFormat::Json,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -108,8 +144,14 @@ struct RecordArgs {
     #[arg(short = 'o', long, default_value = "./ct-traces/")]
     out_dir: PathBuf,
 
-    /// Output format for the trace data.
-    #[arg(short = 'f', long, default_value = "binary")]
+    /// Output container format for the trace data.
+    ///
+    /// Defaults to the canonical CodeTracer multi-stream `.ct` container
+    /// (`ctfs`), which is the format the Nim `ct_reader_*` FFI and the
+    /// db-backend's `CTFSTraceReader` consume directly. `binary` produces
+    /// the legacy CBOR+Zstd shape; `json` produces a human-readable dump
+    /// useful for debugging.
+    #[arg(short = 'f', long, default_value = "ctfs")]
     format: OutputFormat,
 
     /// Treat the input as a pre-compiled .masp package (midenc output).
@@ -191,10 +233,7 @@ fn record(args: RecordArgs) -> Result<()> {
 
     eprintln!("Source file: {}", source_path.display());
 
-    let format = match args.format {
-        OutputFormat::Binary => TraceEventsFileFormat::Binary,
-        OutputFormat::Json => TraceEventsFileFormat::Json,
-    };
+    let format: TraceEventsFileFormat = args.format.into();
 
     // 2. Create the output directory
     let out_dir = &args.out_dir;
