@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use codetracer_trace_types::{Line, TypeKind, ValueRecord, NONE_VALUE};
+use codetracer_trace_types::{EventLogKind, Line, TypeKind, ValueRecord, NONE_VALUE};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
 use eyre::{eyre, Context, Result};
@@ -145,8 +145,23 @@ impl MidenTracer {
         // Current procedure's num_locals for memory address calculation.
         let mut current_num_locals: u16 = 0;
 
+        // Tracks whether the VM iterator surfaced an execution error; if so we
+        // route it through `register_special_event(Error, ...)` so the
+        // frontend's error channel surfaces the runtime failure (mirrors
+        // Cairo 1.50 CairoPanic, Fuel 1.53 Panic/Revert and PolkaVM 1.55
+        // Trap/Segfault routing). The trace is still finalised cleanly so
+        // partial step / call records leading up to the failure remain
+        // navigable in the calltrace pane.
+        let mut vm_error: Option<String> = None;
+
         for result in vm_state_iter {
-            let state: VmState = result.map_err(|e| eyre!("VM execution error: {e}"))?;
+            let state: VmState = match result {
+                Ok(s) => s,
+                Err(e) => {
+                    vm_error = Some(format!("{e}"));
+                    break;
+                }
+            };
 
             let asmop: Option<&AsmOpInfo> = state.asmop.as_ref();
 
@@ -186,6 +201,34 @@ impl MidenTracer {
                     } else {
                         // Entering a new context (call).
                         context_stack.push(prev_ctx.clone());
+
+                        // Stage the visible operand-stack top as canonical
+                        // call args (audit checklist (c)). Miden has no
+                        // separate parameter list — procedures consume
+                        // arguments off the operand stack — so the top-of-
+                        // stack at the call boundary is the closest
+                        // analogue to the calling-convention argument
+                        // registers other recorders stage (PolkaVM 1.55
+                        // A0..A5; Cairo 1.50 ContractCall calldata).
+                        // We use names `s0`..`s3` to avoid colliding with
+                        // the per-step `stack[i]` variable dump below.
+                        // Pre-fix the recorder always passed `vec![]` here
+                        // — the calltrace pane showed every procedure with
+                        // empty arguments.
+                        let arg_depth = state.stack.len().min(4);
+                        for i in 0..arg_depth {
+                            let int_val = state.stack[i].as_int() as i64;
+                            let value = ValueRecord::Int {
+                                i: int_val,
+                                type_id: felt_type_id,
+                            };
+                            let _ = TraceWriter::arg(
+                                &mut *self.writer,
+                                &format!("s{i}"),
+                                value,
+                            );
+                        }
+
                         let fn_id = TraceWriter::ensure_function_id(
                             &mut *self.writer,
                             &context_name,
@@ -266,6 +309,21 @@ impl MidenTracer {
                     }
                 }
             }
+        }
+
+        // If the VM iterator surfaced an execution error, route it through
+        // the structured error channel before draining the call stack so
+        // the partial trace finalises with the failure recorded. Same
+        // pattern as Cairo 1.50 CairoPanic, Cardano 1.48 AikenUplcEvalError,
+        // Fuel 1.53 Panic/Revert and PolkaVM 1.55 Trap/Segfault.
+        if let Some(ref message) = vm_error {
+            eprintln!("Miden VM execution error: {message}");
+            TraceWriter::register_special_event(
+                &mut *self.writer,
+                EventLogKind::Error,
+                "miden_vm_error",
+                message,
+            );
         }
 
         // If we are still inside nested contexts, emit returns for them.
