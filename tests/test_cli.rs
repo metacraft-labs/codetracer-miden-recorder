@@ -162,20 +162,28 @@ fn test_record_creates_trace_files() {
 // ===========================================================================
 
 /// Record the bundled `compute.masm` fixture, then convert the
-/// produced `.ct` container to JSON via `ct-print --json` and assert on
-/// the textual representation.
+/// produced `.ct` container to JSON via `ct-print` and assert on:
+///
+/// 1. **Structural anchors** (legacy layer): `ct-print --json` output
+///    contains the fixture source filename and at least one of the
+///    MASM procedure names somewhere in the textual rendering.
+/// 2. **Exact decoded values** (the layer enabled by `ct-print --full`):
+///    the `compute.masm` program drives ten MASM procedures from a
+///    `begin` block — `fibonacci(10) → 55`, `factorial(7) → 5040`,
+///    `max_of_three(15, 42, 23) → 42`, `array_sum → 150`, etc.  The
+///    canonical call sequence and the call-args staged by the recorder
+///    (operand-stack top `s0..s3` at the call boundary) must surface
+///    with decoded `Int` ValueRecords whose `i` fields match the
+///    fixture's deterministic values.
 ///
 /// Pre-2026-05-08 the recorder shipped a `--format json` mode and a
 /// trace.json file was written directly.  The convention now mandates
 /// CTFS-only output; `ct print` is the canonical conversion tool.  See
-/// `Recorder-CLI-Conventions.md` §4.
-///
-/// The Miden recorder's variable payload (felt values encoded as
-/// `ValueRecord::Int { i, type_id }`) does not round-trip through
-/// `ct print --json` today (same pre-existing limitation as cardano /
-/// circom / flow / fuel / leo), so this test asserts on **structural
-/// anchors** — the fixture's source path file name and at least one
-/// of the MASM procedure names — rather than on integer values.
+/// `Recorder-CLI-Conventions.md` §4.  `ct-print --full` (added 2026-05
+/// in `codetracer-trace-format-nim`) is what enables the exact-value
+/// layer — its output is a deterministic JSON document with every CBOR
+/// `ValueRecord` decoded to a structured form like
+/// `{"kind":"Int","i":42,"type_id":N}`.
 #[test]
 fn test_recorded_trace_via_ct_print_json() {
     let ct_print = ct_print_path();
@@ -209,7 +217,11 @@ fn test_recorded_trace_via_ct_print_json() {
     );
     let ct_path = &ct_files[0];
 
-    // ct-print --json <file.ct>
+    // -----------------------------------------------------------------
+    // Layer 1 (legacy): ct-print --json — substring presence checks.
+    // Kept as a safety net so a regression in the textual rendering
+    // is caught even if --full's JSON shape evolves.
+    // -----------------------------------------------------------------
     let output = Command::new(&ct_print)
         .args(["--json"])
         .arg(ct_path)
@@ -218,7 +230,7 @@ fn test_recorded_trace_via_ct_print_json() {
 
     assert!(
         output.status.success(),
-        "ct-print should succeed; stderr: {}",
+        "ct-print --json should succeed; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -251,6 +263,308 @@ fn test_recorded_trace_via_ct_print_json() {
          MASM procedure names \
          (fibonacci/factorial/max_of_three/array_sum/arithmetic_demo); \
          got:\n{stdout}"
+    );
+
+    // -----------------------------------------------------------------
+    // Layer 2 (the upgrade): ct-print --full — exact decoded values.
+    // -----------------------------------------------------------------
+    let full_output = Command::new(&ct_print)
+        .args(["--full", "--strip-paths"])
+        .arg(ct_path)
+        .output()
+        .expect("failed to run ct-print --full");
+
+    assert!(
+        full_output.status.success(),
+        "ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&full_output.stderr)
+    );
+
+    let doc: serde_json::Value = serde_json::from_slice(&full_output.stdout)
+        .expect("ct-print --full should emit valid JSON");
+
+    // ----- Function table: every MASM procedure must appear -----------
+    // The Miden recorder qualifies each procedure with the synthetic
+    // `#exec::` prefix that the assembler attaches to procedures
+    // executed from a `begin` block (the source has no explicit module
+    // name).  We use `ends_with` so a future change in the prefix
+    // (e.g. `module::compute::fibonacci`) does not silently break the
+    // assertion.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for name in [
+        "::fibonacci",
+        "::factorial",
+        "::max_of_three",
+        "::array_sum",
+        "::bitwise_ops",
+        "::stack_manipulation",
+        "::nested_control_flow",
+        "::arithmetic_demo",
+        "::memory_word_ops",
+    ] {
+        assert!(
+            functions.iter().any(|f| f.ends_with(name)),
+            "expected a function ending with `{name}` in functions table; got {:?}",
+            functions
+        );
+    }
+
+    // ----- Path table: the canonical fixture path must appear ---------
+    let paths: Vec<&str> = doc["paths"]
+        .as_array()
+        .expect("paths array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        paths.iter().any(|p| p.ends_with("compute.masm")),
+        "expected compute.masm in paths table; got {:?}",
+        paths
+    );
+
+    // ----- Step / call counts ----------------------------------------
+    // The Miden recorder emits one step per source-line transition for
+    // each cycle that carries an AsmOp (skipping the duplicate inner
+    // cycles of multi-cycle ops).  For `compute.masm` that's a stable
+    // 178 step events and 13 call_entry events (10 named procedures
+    // plus 3 nested calls the context-name tracker observes inside
+    // memory_word_ops).  These are stable properties of the canonical
+    // fixture — if they change, that's a real regression to
+    // investigate, not a flake.
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(178),
+        "expected 178 step events for compute.masm; counts={counts}",
+    );
+    assert_eq!(
+        counts["calls"].as_u64(),
+        Some(13),
+        "expected 13 call events for compute.masm; counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+
+    // ----- Call sequence: ten named procedures, in source order -------
+    // The `begin` block dispatches procedures in this exact order; the
+    // recorder's context-tracking emits a `call_entry` the first time
+    // each procedure's context_name appears.  `arithmetic_demo` is
+    // exec'd twice (n=8 then n=3 branches of nested_control_flow), so
+    // it shows up twice in the call sequence.  The trailing two
+    // call_entry events have no `function` field — they correspond to
+    // out-of-range function ids the recorder synthesises while
+    // mem_storew/mem_loadw inside `memory_word_ops` flips the
+    // context_name; we don't assert on those here (the count check
+    // above already pins them).
+    let named_call_sequence: Vec<&str> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .filter_map(|e| e["function"].as_str())
+        .collect();
+    let expected_call_sequence: &[&str] = &[
+        "::fibonacci",
+        "::factorial",
+        "::max_of_three",
+        "::array_sum",
+        "::#main",
+        "::bitwise_ops",
+        "::stack_manipulation",
+        "::nested_control_flow",
+        "::arithmetic_demo",
+        "::arithmetic_demo",
+        "::memory_word_ops",
+    ];
+    assert_eq!(
+        named_call_sequence.len(),
+        expected_call_sequence.len(),
+        "expected {} named call_entry events; got {:?}",
+        expected_call_sequence.len(),
+        named_call_sequence
+    );
+    for (i, expected_suffix) in expected_call_sequence.iter().enumerate() {
+        assert!(
+            named_call_sequence[i].ends_with(expected_suffix),
+            "expected named call #{i} to end with `{expected_suffix}`; \
+             got `{}` (full sequence = {:?})",
+            named_call_sequence[i],
+            named_call_sequence
+        );
+    }
+
+    // ----- Strict ValueRecord::Int invariant on every decoded value ---
+    // The Miden recorder always encodes felts as `ValueRecord::Int`
+    // (see `tracer.rs`).  If a future change starts emitting a
+    // different variant — e.g. BigInt for felts that exceed the
+    // signed-i64 range, or a typed `Felt` primitive — this assertion
+    // fires loudly so the test author can decide whether to extend
+    // the assertions or accept the new variant.
+    let mut value_count = 0usize;
+    let mut check_int = |label: &str, value: &serde_json::Value| {
+        assert_eq!(
+            value["kind"].as_str(),
+            Some("Int"),
+            "{label} should decode as Int, got {value}; \
+             if a new ValueRecord variant has landed for miden felts, \
+             extend this test to assert on it explicitly rather than \
+             weakening the check",
+        );
+        assert!(
+            value["i"].is_i64(),
+            "{label}: Int.i must be a signed integer; got {value}"
+        );
+        value_count += 1;
+    };
+    for e in events {
+        if e["kind"] == "call_entry" {
+            for arg in e["args"].as_array().into_iter().flatten() {
+                let name = arg["varname"].as_str().unwrap_or("?");
+                check_int(&format!("call_entry arg `{name}`"), &arg["value"]);
+            }
+        } else if e["kind"] == "step" {
+            for v in e["vars"].as_array().into_iter().flatten() {
+                let name = v["varname"].as_str().unwrap_or("?");
+                check_int(&format!("step var `{name}`"), &v["value"]);
+            }
+        }
+    }
+    assert!(
+        value_count > 0,
+        "expected at least one decoded ValueRecord in events; got 0"
+    );
+
+    // ----- Exact (varname, value) assertions on canonical call args --
+    // The Miden recorder stages the visible operand-stack top
+    // (`s0..s3`) at every call boundary as canonical args (see
+    // `tracer.rs::process_vm_states`'s call-detection block).  The
+    // `compute.masm` fixture is fully deterministic — every call
+    // boundary produces exact, fixed felt values for `s0..s3`:
+    //
+    //   * fibonacci entry: stack carries the input `n=10`     → s1=10
+    //   * factorial entry: stack still has the fib(10)=55     → s2=55,
+    //     and factorial's input `n=7` is on top                → s1=7
+    //   * max_of_three entry: largest of (15,42,23) reduction → s2=42
+    //   * array_sum entry: carries factorial(7)=5040          → s2=5040
+    //   * nested_control_flow entry: input n=8                → s0=8
+    //
+    // These tie directly to the source program's `begin` block.  Any
+    // change that breaks them (a renamed procedure, a different stack
+    // discipline at the call boundary, or a different felt encoding)
+    // is a real regression worth investigating.
+    fn call_args(
+        events: &[serde_json::Value],
+        suffix: &str,
+        occurrence: usize,
+    ) -> Vec<(String, i64)> {
+        events
+            .iter()
+            .filter(|e| e["kind"] == "call_entry")
+            .filter(|e| e["function"].as_str().is_some_and(|f| f.ends_with(suffix)))
+            .nth(occurrence)
+            .unwrap_or_else(|| {
+                panic!("could not find call_entry #{occurrence} ending with `{suffix}`")
+            })["args"]
+            .as_array()
+            .expect("args array")
+            .iter()
+            .map(|a| {
+                let name = a["varname"].as_str().unwrap().to_string();
+                let i = a["value"]["i"]
+                    .as_i64()
+                    .unwrap_or_else(|| panic!("arg `{name}` Int.i not i64"));
+                (name, i)
+            })
+            .collect()
+    }
+
+    let expected_args: &[(&str, usize, &[(&str, i64)])] = &[
+        (
+            "::fibonacci",
+            0,
+            &[("s0", 0), ("s1", 10), ("s2", 0), ("s3", 0)],
+        ),
+        (
+            "::factorial",
+            0,
+            &[("s0", 0), ("s1", 7), ("s2", 55), ("s3", 0)],
+        ),
+        (
+            "::max_of_three",
+            0,
+            &[("s0", 42), ("s1", 23), ("s2", 42), ("s3", 15)],
+        ),
+        (
+            "::array_sum",
+            0,
+            &[("s0", 100), ("s1", 15), ("s2", 5040), ("s3", 55)],
+        ),
+        (
+            "::nested_control_flow",
+            0,
+            &[("s0", 8), ("s1", 150), ("s2", 15), ("s3", 5040)],
+        ),
+        (
+            "::arithmetic_demo",
+            1,
+            &[("s0", 0), ("s1", 3), ("s2", 9), ("s3", 150)],
+        ),
+    ];
+    for (suffix, occurrence, expected) in expected_args {
+        let observed = call_args(events, suffix, *occurrence);
+        assert_eq!(
+            observed.len(),
+            expected.len(),
+            "call_entry #{occurrence} ending with `{suffix}` should have \
+             {} args; got {:?}",
+            expected.len(),
+            observed
+        );
+        for ((on, ov), (en, ev)) in observed.iter().zip(expected.iter()) {
+            assert_eq!(
+                on, en,
+                "call_entry #{occurrence} ending with `{suffix}`: \
+                 expected arg name `{en}` at this position; got `{on}` \
+                 (full args = {:?})",
+                observed
+            );
+            assert_eq!(
+                ov, ev,
+                "call_entry #{occurrence} ending with `{suffix}`: arg \
+                 `{en}` should be {ev}; got {ov} (full args = {:?})",
+                observed
+            );
+        }
+    }
+
+    // ----- Exact step-variable assertion: fib's first step has n=10 --
+    // The very first step inside `#exec::fibonacci` (its line-279
+    // entry, just after the `push.10 exec.fibonacci` call site) must
+    // surface `stack[0] = 10`.  This anchors the test to the source
+    // program: changing `push.10` to `push.11` in the fixture's
+    // `begin` block would fail this assertion.
+    let fib_first_step = events
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .find(|e| {
+            e["function"]
+                .as_str()
+                .is_some_and(|f| f.ends_with("::fibonacci"))
+        })
+        .expect("expected at least one step inside fibonacci");
+    let fib_stack0 = fib_first_step["vars"]
+        .as_array()
+        .and_then(|vs| vs.iter().find(|v| v["varname"] == "stack[0]"))
+        .expect("fibonacci's first step should report stack[0]");
+    assert_eq!(
+        fib_stack0["value"]["i"].as_i64(),
+        Some(10),
+        "fibonacci's first step should see the input `n=10` on \
+         stack[0]; got {}",
+        fib_stack0["value"]
     );
 }
 
