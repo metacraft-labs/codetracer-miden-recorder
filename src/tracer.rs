@@ -6,14 +6,21 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use codetracer_trace_types::{EventLogKind, Line, TypeKind, ValueRecord, NONE_VALUE};
+use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeKind, ValueRecord};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
-use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
-use eyre::{eyre, Context, Result};
+use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
+use eyre::{Context, Result, eyre};
 use miden_assembly::Assembler;
-use miden_processor::{execute_iter, AsmOpInfo, DefaultHost, StackInputs, VmState};
+use miden_processor::{AsmOpInfo, DefaultHost, StackInputs, VmState, execute_iter};
 
 use crate::source_map::SourceMap;
+
+/// The on-disk container produced by the recorder is always the canonical
+/// multi-stream CTFS bundle.  Pre-2026-05-08 the recorder accepted a
+/// `TraceEventsFileFormat` parameter and the CLI exposed a `--format` flag;
+/// the convention now mandates CTFS-only output (see
+/// `Recorder-CLI-Conventions.md` §4 in `codetracer-specs`).
+const TRACE_FORMAT: TraceEventsFileFormat = TraceEventsFileFormat::Ctfs;
 
 /// The main tracer struct that captures Miden VM execution traces.
 pub struct MidenTracer {
@@ -23,40 +30,37 @@ pub struct MidenTracer {
 }
 
 impl MidenTracer {
-    /// Trace a MASM program and write CodeTracer output files.
+    /// Trace a MASM program and write a CodeTracer CTFS trace bundle.
     ///
     /// 1. Assembles the MASM source in debug mode.
     /// 2. Executes with `execute_iter` to step through VM states.
     /// 3. Emits Step / Call / Return / Variable events.
-    /// 4. Writes a `.ct` container file to `out_dir`.
-    pub fn trace_program(
-        source_path: &Path,
-        source_code: &str,
-        out_dir: &Path,
-        format: TraceEventsFileFormat,
-    ) -> Result<()> {
+    /// 4. Writes a multi-stream `.ct` container file to `out_dir`.
+    ///
+    /// The output format is fixed to CTFS — see
+    /// `Recorder-CLI-Conventions.md` §4 in `codetracer-specs`.  Use
+    /// `ct print` (from `codetracer-trace-format-nim`) for human-readable
+    /// conversion of the produced bundle.
+    pub fn trace_program(source_path: &Path, source_code: &str, out_dir: &Path) -> Result<()> {
         let program_str = source_path.to_string_lossy();
-        let writer = create_trace_writer(&program_str, &[], format);
+        let writer = create_trace_writer(&program_str, &[], TRACE_FORMAT);
 
         // Initialise output files.
         std::fs::create_dir_all(out_dir)
             .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
 
-        let events_filename = match format {
-            TraceEventsFileFormat::Json => "trace.json",
-            TraceEventsFileFormat::Binary | TraceEventsFileFormat::BinaryV0 | TraceEventsFileFormat::Ctfs => "trace.bin",
-        };
-        let events_path = out_dir.join(events_filename);
+        // CTFS multi-stream container — `db-backend` infers the format
+        // from the `.bin` extension.  No JSON / legacy-binary alternative
+        // is exposed.
+        let events_path = out_dir.join("trace.bin");
         let metadata_path = out_dir.join("trace_metadata.json");
         let paths_path = out_dir.join("trace_paths.json");
 
         Self::trace_program_with_writer(source_path, source_code, writer, |w| {
-            TraceWriter::begin_writing_trace_events(w, &events_path)
-                .map_err(|e| eyre!("{e}"))?;
+            TraceWriter::begin_writing_trace_events(w, &events_path).map_err(|e| eyre!("{e}"))?;
             TraceWriter::begin_writing_trace_metadata(w, &metadata_path)
                 .map_err(|e| eyre!("{e}"))?;
-            TraceWriter::begin_writing_trace_paths(w, &paths_path)
-                .map_err(|e| eyre!("{e}"))?;
+            TraceWriter::begin_writing_trace_paths(w, &paths_path).map_err(|e| eyre!("{e}"))?;
             Ok(())
         })?;
         Ok(())
@@ -222,11 +226,7 @@ impl MidenTracer {
                                 i: int_val,
                                 type_id: felt_type_id,
                             };
-                            let _ = TraceWriter::arg(
-                                &mut *self.writer,
-                                &format!("s{i}"),
-                                value,
-                            );
+                            let _ = TraceWriter::arg(&mut *self.writer, &format!("s{i}"), value);
                         }
 
                         let fn_id = TraceWriter::ensure_function_id(

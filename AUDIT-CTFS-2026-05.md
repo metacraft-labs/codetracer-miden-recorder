@@ -333,3 +333,93 @@ advice-tape / `debug.*` routing + symbolic ABI-driven arg names +
 real `contract` / `replay` tracing + `.masp` support open as
 recorder-side / dependency-alignment / toolchain follow-ups).
 Audited recorder count: 12 → 13.
+
+## Convention compliance follow-up — 2026-05-08
+
+The 2026-05-02 audit landed a `--format ctfs|binary|json` `clap::ValueEnum`
+defaulting to `Ctfs`, mirroring the EVM (1.39) / Solana (1.44) /
+Move (1.46) / Cardano (1.48) / Cairo (1.50) / Flow (1.52) / Fuel (1.53) /
+PolkaVM (1.55) audits.  Subsequent to that audit,
+`Recorder-CLI-Conventions.md` §4 in `codetracer-specs` was tightened
+to require **CTFS-only** output: recorders no longer accept a
+`--format` flag and `ct print` (shipped with `codetracer-trace-format-nim`)
+is the canonical conversion tool for human-readable output.
+`Repo-Requirements.md` §2.2 / §2.3 reflect this contract.
+
+This entry records the convention compliance follow-up applied to the
+Miden recorder on 2026-05-08, mirroring the cairo / cardano / circom /
+flow / fuel / leo precedents:
+
+* The `--format` / `-f` CLI flag was removed from the `record`
+  subcommand.  The `OutputFormat` enum, the
+  `impl From<OutputFormat> for TraceEventsFileFormat` block, and the
+  `OutputFormat::as_str` helper were deleted from `src/main.rs`.
+  Clap rejects `--format <anything>` with an
+  "unexpected argument" error.
+* The recorder's writer is hard-pinned to
+  `TraceEventsFileFormat::Ctfs` at every call site:
+  `tracer.rs::MidenTracer::trace_program` and `recorder.rs::record`
+  no longer take a `format` parameter.  The fixed format is captured
+  in a `const TRACE_FORMAT: TraceEventsFileFormat =
+  TraceEventsFileFormat::Ctfs;` constant in `tracer.rs`.
+* The `events_filename` match in `tracer.rs` (which used to dispatch
+  on `Json` / `Binary` / `BinaryV0` / `Ctfs`) was collapsed to the
+  single `"trace.bin"` arm — `db-backend` infers the format from the
+  `.bin` extension.
+* `CODETRACER_MIDEN_RECORDER_OUT_DIR` was added as a fallback for
+  `--out-dir`.  Lookup order is CLI flag → env var → `./ct-traces/`.
+  The `record`, `contract`, and `replay` subcommands all participate
+  in this fallback (out-dir on each is now `Option<PathBuf>` and is
+  resolved through the shared `resolve_out_dir` helper).
+* `CODETRACER_MIDEN_RECORDER_DISABLED=1` (or `true`) skips the trace
+  emission entirely; the Miden recorder doesn't run a separate target
+  subprocess so "disabled" simply means "don't write any artefacts".
+* The CTFS-only contract is now in force across the codebase: the
+  binary's `--help` output mentions `ct print` as the conversion tool;
+  the new `README.md` documents only CTFS, the env-var contract, and
+  the `ct print` workflow.
+* The pre-existing `tests/test_ctfs_audit.rs::ctfs_format_advertised_in_record_help`
+  test was deleted: it asserted on the old `--format` contract that's
+  now inverted (it required the help text to contain the strings
+  `ctfs` and `[default: ctfs]`, both of which are now guaranteed
+  absent because the entire flag is gone).  Its replacement coverage
+  is at-least-as-strong: `tests/test_cli.rs::test_no_format_flag_in_help`
+  (asserts `--format` is absent at every subcommand level),
+  `tests/test_cli.rs::test_format_flag_rejected_by_clap` (asserts
+  clap rejects the flag at runtime), and
+  `tests/test_cli.rs::test_help_mentions_ct_print` (pins the
+  conversion-tool advertisement).  Same shape as the leo recorder's
+  d567b52 commit.
+* The legacy `tests/test_cli.rs::test_record_creates_trace_files`
+  test (which previously asserted on the CTFS magic bytes of the
+  default output) was kept and now reflects the no-`--format`
+  invocation shape.  The accompanying `test_recorded_trace_via_ct_print_json`
+  pipes the produced `.ct` container through `ct-print --json` and
+  asserts on **structural anchors** — the fixture source path
+  (`compute.masm`) and at least one of the MASM procedure names —
+  rather than on integer values, because felt-typed payloads do not
+  round-trip through `ct print --json` today (same pre-existing
+  limitation as cardano / circom / flow / fuel / leo).
+* New env-var integration tests
+  (`test_env_out_dir_used_when_flag_omitted`,
+  `test_env_disabled_skips_recording`,
+  `test_format_flag_rejected_by_clap`,
+  `test_no_format_flag_in_help`,
+  `test_help_mentions_ct_print`) cover the convention §5 surface.
+* `tests/test_ctfs_audit.rs::ctfs_writer_produces_ct_container` and
+  `tests/test_ctfs_audit.rs::call_arg_staging_does_not_empty_trace`
+  were updated to call `recorder::record(...)` without a format
+  argument, asserting the new contract.
+* `tests/verify-cli-convention-no-silent-skip.sh` was added as a
+  shell-level guard that runs the binary's `--help`, asserts
+  `--format` and `CODETRACER_FORMAT` are absent at every subcommand
+  level, asserts the standard flags (`--out-dir`, `--version`) are
+  present, and asserts the `CODETRACER_MIDEN_RECORDER_OUT_DIR` /
+  `CODETRACER_MIDEN_RECORDER_DISABLED` env vars are referenced in
+  source.  A `Justfile` was added at repo root to wire it into
+  `just lint` / `just test`.
+
+References:
+
+* [`codetracer-specs/Recorder-CLI-Conventions.md`](../codetracer-specs/Recorder-CLI-Conventions.md) §4 (CTFS-only) and §5 (env vars).
+* [`codetracer-specs/Repo-Requirements.md`](../codetracer-specs/Repo-Requirements.md) §2.2 (CLI compliance) and §2.3 (trace format compatibility).

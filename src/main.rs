@@ -2,32 +2,76 @@
 //!
 //! Supports the `record` subcommand which loads a MASM source file,
 //! executes it through the Miden VM, captures the execution trace,
-//! and writes CodeTracer trace output files.
+//! and writes a CodeTracer CTFS trace bundle.
 //!
 //! # Usage
 //!
 //! ```text
-//! codetracer-miden-recorder record <masm-file> \
-//!     --out-dir <output-dir> \
-//!     [--format ctfs|binary|json]
+//! codetracer-miden-recorder record <masm-file> --out-dir <output-dir>
 //! ```
+//!
+//! The recorder always writes traces in the canonical CodeTracer multi-stream
+//! CTFS format (see `Recorder-CLI-Conventions.md` §4 in `codetracer-specs`).
+//! No `--format` flag is exposed: human-readable conversion is handled
+//! out-of-band by `ct print` (shipped with `codetracer-trace-format-nim`).
+//!
+//! # Environment variables
+//!
+//! * `CODETRACER_MIDEN_RECORDER_OUT_DIR` — fallback for `--out-dir` when the
+//!   flag is not given. The CLI flag always wins.
+//! * `CODETRACER_MIDEN_RECORDER_DISABLED` — set to `1` or `true` to skip
+//!   recording entirely. The recorder still validates its inputs (where
+//!   applicable) and propagates a clean exit code.
+//! * `CODETRACER_MIDEN_RECORDER_LOG_LEVEL` — recorder log verbosity (advisory;
+//!   the Miden recorder currently logs to stderr unconditionally).
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
-use codetracer_trace_writer_nim::TraceEventsFileFormat;
+use clap::{Parser, Subcommand};
 use eyre::{Context, Result};
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Environment variable used as a fallback for `--out-dir` when the CLI
+/// flag is omitted.  Convention: see `Recorder-CLI-Conventions.md` §5.
+const ENV_OUT_DIR: &str = "CODETRACER_MIDEN_RECORDER_OUT_DIR";
+
+/// Environment variable that, when set to `1`/`true`, disables tracing
+/// entirely — the recorder runs as a transparent pass-through.
+const ENV_DISABLED: &str = "CODETRACER_MIDEN_RECORDER_DISABLED";
+
+/// Default output directory used when neither `--out-dir` nor
+/// `CODETRACER_MIDEN_RECORDER_OUT_DIR` is set.
+const DEFAULT_OUT_DIR: &str = "./ct-traces/";
 
 // ---------------------------------------------------------------------------
 // CLI definition
 // ---------------------------------------------------------------------------
 
-/// CodeTracer Miden recorder — record Miden VM execution traces.
+/// CodeTracer Miden recorder -- record Miden VM program execution traces.
+///
+/// Traces are always written in the canonical CTFS multi-stream format.
+/// To convert a recorded `.ct` bundle to JSON / text for inspection, use
+/// `ct print` from `codetracer-trace-format-nim`.
 #[derive(Debug, Parser)]
 #[command(
     name = "codetracer-miden-recorder",
     version,
-    about = "Record Miden VM program execution traces for CodeTracer"
+    about = "Record Miden VM program execution traces for CodeTracer (CTFS-only). \
+             Use `ct print` from codetracer-trace-format-nim for human-readable conversion.",
+    long_about = "Record Miden VM program execution traces for CodeTracer.\n\
+                  \n\
+                  Output is always written in the canonical CodeTracer CTFS\n\
+                  multi-stream format. Use `ct print` (shipped with the\n\
+                  codetracer-trace-format-nim sibling) to convert a recorded\n\
+                  `.ct` bundle to JSON or other human-readable forms.\n\
+                  \n\
+                  Environment variables:\n\
+                    CODETRACER_MIDEN_RECORDER_OUT_DIR    fallback for --out-dir\n\
+                    CODETRACER_MIDEN_RECORDER_DISABLED   set to 1/true to skip recording\n\
+                    CODETRACER_MIDEN_RECORDER_LOG_LEVEL  log verbosity (advisory)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -39,8 +83,7 @@ enum Commands {
     /// Record execution of a MASM program.
     ///
     /// Assembles and executes the given MASM source file through the Miden VM,
-    /// captures the execution trace, and writes CodeTracer trace files to
-    /// `--out-dir`.
+    /// captures the execution trace, and writes a CTFS bundle to `--out-dir`.
     Record(RecordArgs),
 
     /// Record execution of a Miden contract in a MockChain environment.
@@ -68,53 +111,14 @@ enum Commands {
     Version,
 }
 
-/// Trace output container format.
-///
-/// The canonical CodeTracer pipeline (Nim `ct_reader_*` FFI and the
-/// db-backend's `CTFSTraceReader`) consumes the multi-stream `Ctfs`
-/// container directly. The other variants are kept for parity with
-/// other recorders and for debugging:
-///
-/// * `Ctfs` — recommended; canonical multi-stream `.ct` container.
-/// * `Binary` — legacy CBOR + Zstd binary format.
-/// * `Json` — human-readable JSON (slower; useful for inspection).
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum OutputFormat {
-    /// Canonical CodeTracer multi-stream container (recommended).
-    Ctfs,
-    /// Legacy CBOR + Zstd binary format.
-    Binary,
-    /// Human-readable JSON (slower; useful for debugging).
-    Json,
-}
-
-impl OutputFormat {
-    /// Stable lowercase name for the format, suitable for JSON metadata.
-    #[allow(dead_code)]
-    fn as_str(self) -> &'static str {
-        match self {
-            OutputFormat::Ctfs => "ctfs",
-            OutputFormat::Binary => "binary",
-            OutputFormat::Json => "json",
-        }
-    }
-}
-
-impl From<OutputFormat> for TraceEventsFileFormat {
-    fn from(fmt: OutputFormat) -> Self {
-        match fmt {
-            OutputFormat::Ctfs => TraceEventsFileFormat::Ctfs,
-            OutputFormat::Binary => TraceEventsFileFormat::Binary,
-            OutputFormat::Json => TraceEventsFileFormat::Json,
-        }
-    }
-}
-
 #[derive(Debug, clap::Args)]
 struct ContractArgs {
     /// Directory where the trace files will be written.
-    #[arg(short = 'o', long, default_value = "./ct-traces/")]
-    out_dir: PathBuf,
+    ///
+    /// Falls back to the `CODETRACER_MIDEN_RECORDER_OUT_DIR` environment
+    /// variable when the flag is omitted.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
 
     /// Account ID for the wallet (hex, e.g. "0x1234").
     #[arg(long, default_value = "0x1000")]
@@ -140,19 +144,11 @@ struct RecordArgs {
 
     /// Directory where the trace files will be written.
     ///
-    /// The directory will be created if it does not exist.
-    #[arg(short = 'o', long, default_value = "./ct-traces/")]
-    out_dir: PathBuf,
-
-    /// Output container format for the trace data.
-    ///
-    /// Defaults to the canonical CodeTracer multi-stream `.ct` container
-    /// (`ctfs`), which is the format the Nim `ct_reader_*` FFI and the
-    /// db-backend's `CTFSTraceReader` consume directly. `binary` produces
-    /// the legacy CBOR+Zstd shape; `json` produces a human-readable dump
-    /// useful for debugging.
-    #[arg(short = 'f', long, default_value = "ctfs")]
-    format: OutputFormat,
+    /// The directory will be created if it does not exist.  Falls back to
+    /// the `CODETRACER_MIDEN_RECORDER_OUT_DIR` environment variable when the
+    /// flag is omitted.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
 
     /// Treat the input as a pre-compiled .masp package (midenc output).
     ///
@@ -178,8 +174,11 @@ struct ReplayArgs {
     transaction_id: String,
 
     /// Directory where the trace files will be written.
-    #[arg(short = 'o', long, default_value = "./ct-traces/")]
-    out_dir: PathBuf,
+    ///
+    /// Falls back to the `CODETRACER_MIDEN_RECORDER_OUT_DIR` environment
+    /// variable when the flag is omitted.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
 
     /// Path to captured TransactionInputs JSON file.
     ///
@@ -188,6 +187,39 @@ struct ReplayArgs {
     /// for reliable replay.
     #[arg(long)]
     captured_inputs: Option<PathBuf>,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve the effective output directory:
+///   1. `--out-dir` if given on the CLI.
+///   2. `CODETRACER_MIDEN_RECORDER_OUT_DIR` env var.
+///   3. `DEFAULT_OUT_DIR` ("./ct-traces/").
+fn resolve_out_dir(cli_out_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = cli_out_dir {
+        return path;
+    }
+    if let Some(value) = std::env::var_os(ENV_OUT_DIR)
+        && !value.is_empty()
+    {
+        return PathBuf::from(value);
+    }
+    PathBuf::from(DEFAULT_OUT_DIR)
+}
+
+/// Whether the recorder is disabled via env var.  When true, the CLI
+/// must execute its target operation in pass-through mode without
+/// emitting any trace artefacts.
+fn recording_disabled() -> bool {
+    match std::env::var(ENV_DISABLED) {
+        Ok(value) => {
+            let v = value.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        }
+        Err(_) => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,15 +265,21 @@ fn record(args: RecordArgs) -> Result<()> {
 
     eprintln!("Source file: {}", source_path.display());
 
-    let format: TraceEventsFileFormat = args.format.into();
+    if recording_disabled() {
+        // Pass-through: the Miden recorder doesn't run a separate target
+        // process — it assembles & executes the source itself — so disabling
+        // recording simply means "don't emit any trace artefacts".
+        eprintln!("{ENV_DISABLED} is set; skipping trace recording (no output written).");
+        return Ok(());
+    }
 
-    // 2. Create the output directory
-    let out_dir = &args.out_dir;
-    std::fs::create_dir_all(out_dir)
+    // 2. Resolve and create the output directory
+    let out_dir = resolve_out_dir(args.out_dir);
+    std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
 
-    // 3. Run the recorder
-    codetracer_miden_recorder::recorder::record(&source_path, out_dir, format)?;
+    // 3. Run the recorder (CTFS only)
+    codetracer_miden_recorder::recorder::record(&source_path, &out_dir)?;
 
     eprintln!("Trace files written to {}", out_dir.display());
 
@@ -265,6 +303,13 @@ fn contract(args: ContractArgs) -> Result<()> {
         "Contract trace: wallet={}, faucet={}, symbol={}, debug={}",
         args.wallet_id, args.faucet_id, args.symbol, args.debug
     );
+
+    if recording_disabled() {
+        eprintln!("{ENV_DISABLED} is set; skipping contract trace (no output written).");
+        return Ok(());
+    }
+
+    let out_dir = resolve_out_dir(args.out_dir);
 
     // Build a MockChain configuration.
     let config = MockChainConfig {
@@ -295,7 +340,7 @@ fn contract(args: ContractArgs) -> Result<()> {
     };
 
     // Create and run the session.
-    let mut session = ContractTraceSession::new(config, args.out_dir.clone());
+    let mut session = ContractTraceSession::new(config, out_dir.clone());
     session.build_chain().map_err(|e| eyre::eyre!(e))?;
 
     let tx_config = TransactionConfig {
@@ -336,11 +381,18 @@ fn replay(args: ReplayArgs) -> Result<()> {
         args.node_url, args.account_id, args.transaction_id
     );
 
+    if recording_disabled() {
+        eprintln!("{ENV_DISABLED} is set; skipping replay recording (no output written).");
+        return Ok(());
+    }
+
+    let out_dir = resolve_out_dir(args.out_dir);
+
     let mut config = client_replay::ReplayConfig::new(
         &args.node_url,
         &args.account_id,
         &args.transaction_id,
-        &args.out_dir,
+        &out_dir,
     );
 
     if let Some(ref captured_path) = args.captured_inputs {
