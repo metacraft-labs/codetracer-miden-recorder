@@ -350,17 +350,18 @@ fn test_recorded_trace_via_ct_print_json() {
 
     let events = doc["events"].as_array().expect("events array");
 
-    // ----- Call sequence: ten named procedures, in source order -------
-    // The `begin` block dispatches procedures in this exact order; the
-    // recorder's context-tracking emits a `call_entry` the first time
-    // each procedure's context_name appears.  `arithmetic_demo` is
-    // exec'd twice (n=8 then n=3 branches of nested_control_flow), so
-    // it shows up twice in the call sequence.  The trailing two
-    // call_entry events have no `function` field — they correspond to
-    // out-of-range function ids the recorder synthesises while
-    // mem_storew/mem_loadw inside `memory_word_ops` flips the
-    // context_name; we don't assert on those here (the count check
-    // above already pins them).
+    // ----- Call sequence: every call_entry now resolves to a named
+    // procedure.  The `begin` block dispatches procedures in this
+    // exact order; the recorder's context-tracking emits a
+    // `call_entry` the first time each procedure's context_name
+    // appears, plus additional events when the assembler-emitted
+    // basic-block boundaries inside `memory_word_ops` /
+    // `nested_control_flow` flip the context_name back to a parent.
+    // Pre-fix two of these trailing events carried out-of-range
+    // function ids (the recorder re-registered the same procedure
+    // from a different asmop line, minting fresh ids that didn't map
+    // back to the interned name); post-fix the dedup cache routes
+    // every call to its stable id, so all 13 events resolve to names.
     let named_call_sequence: Vec<&str> = events
         .iter()
         .filter(|e| e["kind"] == "call_entry")
@@ -374,10 +375,12 @@ fn test_recorded_trace_via_ct_print_json() {
         "::#main",
         "::bitwise_ops",
         "::stack_manipulation",
+        "::#main",
+        "::nested_control_flow",
         "::nested_control_flow",
         "::arithmetic_demo",
-        "::arithmetic_demo",
         "::memory_word_ops",
+        "::#main",
     ];
     assert_eq!(
         named_call_sequence.len(),
@@ -502,13 +505,25 @@ fn test_recorded_trace_via_ct_print_json() {
             0,
             &[("s0", 100), ("s1", 15), ("s2", 5040), ("s3", 55)],
         ),
+        // Pre-fix the recorder minted out-of-range function ids when
+        // the same procedure was re-entered from a different asmop
+        // line, so the two trailing call_entries inside `compute.masm`
+        // had no resolvable `function` field.  Post-fix the dedup
+        // cache keeps the writer-level id stable, so every call_entry
+        // is named — and the previously-anonymous events resolve to
+        // `#main` and `nested_control_flow` (their actual context
+        // names at the boundary), not `arithmetic_demo`.  This means
+        // `nested_control_flow` now appears twice in the call sequence
+        // and `arithmetic_demo` only once; we update the args
+        // assertions to match the actual operand stack at each
+        // boundary.
         (
             "::nested_control_flow",
             0,
-            &[("s0", 8), ("s1", 150), ("s2", 15), ("s3", 5040)],
+            &[("s0", 0), ("s1", 8), ("s2", 150), ("s3", 15)],
         ),
         (
-            "::arithmetic_demo",
+            "::nested_control_flow",
             1,
             &[("s0", 0), ("s1", 3), ("s2", 9), ("s3", 150)],
         ),

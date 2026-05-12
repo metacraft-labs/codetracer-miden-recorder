@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use codetracer_trace_types::{EventLogKind, Line, NONE_VALUE, TypeKind, ValueRecord};
+use codetracer_trace_types::{EventLogKind, FunctionId, Line, NONE_VALUE, TypeKind, ValueRecord};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
 use eyre::{Context, Result, eyre};
@@ -148,6 +148,16 @@ impl MidenTracer {
         let mut context_stack: Vec<String> = Vec::new();
         // Current procedure's num_locals for memory address calculation.
         let mut current_num_locals: u16 = 0;
+        // Cache of FunctionId per context_name so repeated
+        // ensure_function_id() calls for the same procedure return the
+        // same writer-level id.  The Nim FFI keys the function table on
+        // (name, path, line); without this cache, registering the same
+        // procedure from two different asmop lines (e.g. on re-entry)
+        // would create a SECOND function entry whose id no longer maps
+        // to the interned name in the multi-stream `functions` table,
+        // breaking ct-print's function-name lookup for `call_entry`
+        // events.
+        let mut function_ids: HashMap<String, FunctionId> = HashMap::new();
 
         // Tracks whether the VM iterator surfaced an execution error; if so we
         // route it through `register_special_event(Error, ...)` so the
@@ -195,6 +205,42 @@ impl MidenTracer {
 
             // -- Call / Return detection via context_name changes ------------------------
             if prev_context_name.as_deref() != Some(&context_name) {
+                // Register the newly-observed procedure in the function
+                // table unconditionally — every procedure that surfaces
+                // as a `context_name` (including the very first one,
+                // which has `prev_context_name == None`) must appear in
+                // the trace's `functions` table.  Cross-recorder
+                // convention: PHP / Move / Cardano / Cairo all register
+                // every entered procedure regardless of whether the
+                // recorder also emits a `call_entry` for it.  Without
+                // this hook the first procedure observed (the entry
+                // point of the program, e.g. `mem_writer` when `begin`
+                // does `exec.mem_writer ...`) was silently dropped from
+                // the function table because the call/return-detection
+                // branch below only fires on a transition from a
+                // *known* previous context.
+                //
+                // The cache deduplicates by `context_name`: the Nim
+                // FFI's `ensure_function_id` keys on (name, path, line),
+                // so calling it from a *different* asmop line for the
+                // same procedure would otherwise mint a fresh,
+                // non-interned function id (a writer-level quirk that
+                // also bites the inner call-emitting branch below if
+                // the same procedure is re-entered from a different
+                // asmop boundary).
+                let new_fn_id = if let Some(&existing) = function_ids.get(&context_name) {
+                    existing
+                } else {
+                    let fid = TraceWriter::ensure_function_id(
+                        &mut *self.writer,
+                        &context_name,
+                        source_path,
+                        Line(line as i64),
+                    );
+                    function_ids.insert(context_name.clone(), fid);
+                    fid
+                };
+
                 if let Some(ref prev_ctx) = prev_context_name {
                     // Check if we are returning to a previous context.
                     if context_stack.last().map(|s| s.as_str()) == Some(&context_name) {
@@ -229,13 +275,7 @@ impl MidenTracer {
                             let _ = TraceWriter::arg(&mut *self.writer, &format!("s{i}"), value);
                         }
 
-                        let fn_id = TraceWriter::ensure_function_id(
-                            &mut *self.writer,
-                            &context_name,
-                            source_path,
-                            Line(line as i64),
-                        );
-                        TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
+                        TraceWriter::register_call(&mut *self.writer, new_fn_id, vec![]);
                     }
                 }
                 // Update num_locals for the new context.
