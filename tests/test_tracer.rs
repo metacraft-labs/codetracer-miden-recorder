@@ -1066,13 +1066,19 @@ fn test_control_flow_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // The recorder now registers every procedure whose `context_name`
+    // surfaces during execution — including the entry point `#main`
+    // observed on the very first asmop (`push.8` inside `begin`).  The
+    // function-table order is writer-assignment order, which matches
+    // the order of first observation: `#main` (begin block), then the
+    // three procedures it `exec`s in declaration order.
     assert_eq!(
         functions,
         vec![
+            "#exec::#main",
             "#exec::if_else_demo",
             "#exec::while_sum",
             "#exec::repeat_acc",
-            "#exec::#main",
         ],
         "function table mismatch — has the assembler renamed the synthetic prefix?"
     );
@@ -1335,13 +1341,20 @@ fn test_nested_calls_test_via_ct_print_full() {
     // RECORDER BUG: spec wants
     //   ["#exec::compute", "#exec::outer", "#exec::middle", "#exec::inner", "#exec::#main"]
     // — every defined-and-called procedure should appear.  The
-    // recorder collapses `compute → outer` and `middle → inner` into
-    // a single observed context_name transition, so two procedures
-    // are missing from the function table.
+    // recorder now registers every procedure whose `context_name`
+    // surfaces during execution, so `inner` (the innermost frame and
+    // the first context observed) is captured.  `compute` and `outer`
+    // are still missing because the assembler collapses
+    // `exec.compute` → `exec.outer` → `exec.middle` into a single
+    // observed context (the assembler may inline / tail-call them so
+    // their bodies share the inner procedure's context name).  The
+    // strict `test_nested_calls_full_chain_registered` ignored test
+    // below pins the spec-compliant 4-deep nesting.
     assert_eq!(
         functions,
-        vec!["#exec::middle", "#exec::outer", "#exec::#main"],
-        "RECORDER BUG: only 3 of the 5 defined procedures register as functions"
+        vec!["#exec::inner", "#exec::middle", "#exec::outer", "#exec::#main"],
+        "RECORDER BUG: only 4 of the 5 defined procedures register as functions \
+         (`compute` is never observed as a `context_name`)"
     );
 
     let counts = &doc["counts"];
@@ -1465,15 +1478,15 @@ fn test_memory_ops_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    // RECORDER BUG: spec wants ["#exec::mem_writer", "#exec::mem_reader", "#exec::#main"]
-    // — `mem_writer` is defined and exec'd from `begin`, but the
-    // recorder doesn't observe a context_name transition at the start
-    // of the program (it begins inside mem_writer's body) and so
-    // never registers it as a function.
+    // The recorder registers every procedure whose `context_name`
+    // surfaces during execution, including `mem_writer` (the first
+    // context observed — the begin block dispatches straight into
+    // its body) and `mem_reader` (entered after mem_writer returns).
     assert_eq!(
         functions,
-        vec!["#exec::mem_reader", "#exec::#main"],
-        "RECORDER BUG: mem_writer is exec'd from begin but missing from functions table"
+        vec!["#exec::mem_writer", "#exec::mem_reader", "#exec::#main"],
+        "function table should list every observed procedure in \
+         first-observation order"
     );
 
     let counts = &doc["counts"];
@@ -1566,9 +1579,6 @@ fn test_memory_ops_test_via_ct_print_full() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: every defined-and-called procedure should be \
-            registered as a function.  `mem_writer` is exec'd from \
-            begin but missing from the trace's function table."]
 fn test_memory_ops_mem_writer_registered() {
     let Some((doc, _)) =
         record_and_dump_full("test_memory_ops_mem_writer_registered", "memory_ops_test.masm")
@@ -1613,14 +1623,15 @@ fn test_assertions_pass_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    // RECORDER BUG: spec wants ["#exec::checks", "#exec::#main"].  The
-    // recorder doesn't register `checks` because by the time the first
-    // tracked asmop fires the context_name is already `checks` (the
-    // recorder has no notion of "the program started here").
+    // The recorder registers every procedure whose `context_name`
+    // surfaces during execution, including `checks` (the first
+    // context observed — the begin block dispatches straight into
+    // its body) and `#main` (re-entered after `checks` returns).
     assert_eq!(
         functions,
-        vec!["#exec::#main"],
-        "RECORDER BUG: `checks` is exec'd from begin but missing from functions table"
+        vec!["#exec::checks", "#exec::#main"],
+        "function table should list every observed procedure in \
+         first-observation order"
     );
 
     let counts = &doc["counts"];
@@ -1663,9 +1674,6 @@ fn test_assertions_pass_test_via_ct_print_full() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: every defined-and-called procedure should \
-            be registered.  `checks` is exec'd from begin but missing \
-            from the trace's function table."]
 fn test_assertions_pass_checks_registered() {
     let Some((doc, _)) = record_and_dump_full(
         "test_assertions_pass_checks_registered",
@@ -1713,9 +1721,13 @@ fn test_assertion_fail_test_via_ct_print_full() {
     assert_step_indices_monotonic(&doc);
     assert_all_values_are_int(&doc);
 
-    // RECORDER BUG: function table is empty even though `boom` is
-    // exec'd from begin.  Spec-compliant trace would have at least
-    // ["#exec::boom", "#exec::#main"].
+    // The recorder registers every procedure whose `context_name`
+    // surfaces during execution.  `boom` is the first (and only)
+    // context observed before the deliberate `assert` aborts the VM
+    // mid-procedure, so it appears in the function table.  `#main` is
+    // *not* registered because the failing `assert` aborts before
+    // control ever returns to it — same convention as Cairo's
+    // CairoPanic recording (partial trace stops at the panic frame).
     let functions: Vec<&str> = doc["functions"]
         .as_array()
         .expect("functions array")
@@ -1723,10 +1735,10 @@ fn test_assertion_fail_test_via_ct_print_full() {
         .filter_map(|v| v.as_str())
         .collect();
     assert_eq!(
-        functions.len(),
-        0,
-        "RECORDER BUG: functions table is empty for a failing assert; \
-         spec would expect [`#exec::boom`, `#exec::#main`]; got {functions:?}"
+        functions,
+        vec!["#exec::boom"],
+        "failing assert should still register the calling procedure; \
+         got {functions:?}"
     );
 
     let counts = &doc["counts"];
@@ -1794,10 +1806,6 @@ fn base64_decode_minimal(s: &str) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: a deliberately failing `assert` should not \
-            cause the function table to drop the calling procedure.  \
-            Spec-compliant trace would still register `#exec::boom` \
-            and emit a call_entry for it before the ioError."]
 fn test_assertion_fail_records_boom_function() {
     let Some((doc, _)) = record_and_dump_full(
         "test_assertion_fail_records_boom_function",
@@ -1843,13 +1851,15 @@ fn test_stack_manip_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    // RECORDER BUG: spec wants ["#exec::shuffle", "#exec::#main"].
-    // Same root cause as `assertions_pass_test`: the first asmop's
-    // context_name is already `shuffle`, so no transition fires.
+    // The recorder registers every procedure whose `context_name`
+    // surfaces during execution, including `shuffle` (the first
+    // context observed — the begin block dispatches straight into
+    // its body) and `#main` (re-entered after `shuffle` returns).
     assert_eq!(
         functions,
-        vec!["#exec::#main"],
-        "RECORDER BUG: `shuffle` is exec'd from begin but missing from functions table"
+        vec!["#exec::shuffle", "#exec::#main"],
+        "function table should list every observed procedure in \
+         first-observation order"
     );
 
     let counts = &doc["counts"];
@@ -1920,9 +1930,6 @@ fn test_stack_manip_test_via_ct_print_full() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: every defined-and-called procedure should \
-            be registered.  `shuffle` is exec'd from begin but missing \
-            from the trace's function table."]
 fn test_stack_manip_shuffle_registered() {
     let Some((doc, _)) =
         record_and_dump_full("test_stack_manip_shuffle_registered", "stack_manip_test.masm")
