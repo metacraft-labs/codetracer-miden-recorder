@@ -1,0 +1,65 @@
+# control_flow_test.masm
+#
+# Exercises if/else, while.true, repeat.N, and nested combinations of
+# them via three small procedures invoked in sequence from `begin`.
+#
+# The program is deterministic: all stack inputs come from constants
+# inside the procedures, so every branch executed and every recorded
+# value is fixed.
+
+# --- if/else procedure --------------------------------------------------
+# Push n, branch on (n > 5).  Returns:
+#   * 200 + n  if n > 5
+#   * 100 + n  otherwise
+proc.if_else_demo.0
+    dup push.5 u32gt
+    if.true
+        push.200 add
+    else
+        push.100 add
+    end
+end
+
+# --- while-loop procedure -----------------------------------------------
+# Pop n, return the sum of integers 1..n inclusive using a while loop.
+# Local[0] = accumulator
+# Local[1] = counter (counts down)
+proc.while_sum.2
+    push.0 loc_store.0
+    loc_store.1
+    loc_load.1 push.0 neq
+    while.true
+        loc_load.0 loc_load.1 add loc_store.0
+        loc_load.1 push.1 sub loc_store.1
+        loc_load.1 push.0 neq
+    end
+    loc_load.0
+end
+
+# --- repeat.N procedure -------------------------------------------------
+# Push the constant 0, then accumulate 7 four times via repeat.4.
+# Returns 28.
+proc.repeat_acc.1
+    push.0 loc_store.0
+    repeat.4
+        loc_load.0 push.7 add loc_store.0
+    end
+    loc_load.0
+end
+
+# --- main ---------------------------------------------------------------
+begin
+    # 1. if/else taken (n=8 -> 208)
+    push.8
+    exec.if_else_demo
+
+    # 2. while sum 1..5 = 15
+    push.5
+    exec.while_sum
+
+    # 3. repeat 4x adding 7 -> 28
+    exec.repeat_acc
+
+    # Drop everything we pushed to keep the stack within bounds.
+    drop drop drop
+end

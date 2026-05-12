@@ -1,0 +1,19 @@
+# assertion_fail_test.masm
+#
+# Triggers a deliberate `assert` failure.  The recorder should still
+# produce a partial trace ending with the failed assert; the
+# integration test verifies that the recorder's outer entry-point
+# returns a non-OK Result (or an error-kind event in the recorded
+# stream) without panicking the recorder process.
+
+proc.boom.0
+    # 0 != 1, so the bare `assert` (which expects 1) must fail.
+    push.0 assert
+    # Unreachable.
+    push.123
+end
+
+begin
+    exec.boom
+    drop
+end
