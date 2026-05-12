@@ -1,0 +1,37 @@
+# nested_calls_test.masm
+#
+# Exercises a 4-deep nested procedure call chain
+# (compute -> outer -> middle -> inner) to verify the recorder
+# captures every Call/Return event in the correct nesting order.
+#
+# Every procedure is zero-arg (operands come from constants inside the
+# body) so behaviour is fully deterministic.
+#
+# Expected result:
+#   inner   returns 1 + 2 = 3
+#   middle  returns inner() + 10 = 13
+#   outer   returns middle() + 100 = 113
+#   compute returns outer() = 113
+
+proc.inner.0
+    push.1 push.2 add
+end
+
+proc.middle.0
+    exec.inner
+    push.10 add
+end
+
+proc.outer.0
+    exec.middle
+    push.100 add
+end
+
+proc.compute.0
+    exec.outer
+end
+
+begin
+    exec.compute
+    drop
+end

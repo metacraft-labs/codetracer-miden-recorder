@@ -1,0 +1,31 @@
+# memory_ops_test.masm
+#
+# Exercises both global memory (mem_store/mem_load) and local memory
+# (loc_store/loc_load).  Stores three known values to global memory
+# addresses 50, 51, 52 and reads them back, summing them up to 666
+# (= 111 + 222 + 333).  Also exercises one local variable round-trip.
+
+proc.mem_writer.0
+    # mem_store consumes value then address; pre-stack must be [val, addr]
+    # with addr on top — push value first, then push addr.
+    push.111 push.50 mem_store
+    push.222 push.51 mem_store
+    push.333 push.52 mem_store
+end
+
+proc.mem_reader.1
+    push.0 loc_store.0
+    push.50 mem_load
+    loc_load.0 add loc_store.0
+    push.51 mem_load
+    loc_load.0 add loc_store.0
+    push.52 mem_load
+    loc_load.0 add loc_store.0
+    loc_load.0
+end
+
+begin
+    exec.mem_writer
+    exec.mem_reader
+    drop
+end

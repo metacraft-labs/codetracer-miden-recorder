@@ -1,0 +1,38 @@
+# stack_manip_test.masm
+#
+# Exercises the core stack-manipulation instructions in isolation:
+# dup, swap, drop, movup.N, movdn.N, padw, dropw.  The procedure is
+# arranged so the final stack-top value is a recognisable marker
+# (777) for value-table assertions.
+
+proc.shuffle.0
+    # Build a 4-deep stack: [4, 3, 2, 1, ...]
+    push.1 push.2 push.3 push.4
+
+    # dup the top: [4, 4, 3, 2, 1]
+    dup
+    drop
+
+    # swap top two: [3, 4, 2, 1]
+    swap
+    swap
+
+    # movup.2 brings stack[2] to the top, movdn.2 sends top back down.
+    movup.2
+    movdn.2
+
+    # Pad-then-drop a word (no-op net effect).
+    padw
+    dropw
+
+    # Drop the four working values.
+    drop drop drop drop
+
+    # Final marker that survives.
+    push.777
+end
+
+begin
+    exec.shuffle
+    drop
+end

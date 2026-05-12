@@ -1,0 +1,25 @@
+# assertions_pass_test.masm
+#
+# Exercises the assert / assertz / assert_eq instructions on inputs
+# that satisfy each assertion -- the program must run to completion
+# with no error event.
+
+proc.checks.0
+    # assert: pops a value, errors if it is not 1 (i.e. ZERO)
+    push.1 assert
+
+    # assertz: pops a value, errors if it is not zero
+    push.0 assertz
+
+    # assert_eq: pops two values, errors if they are not equal
+    push.42 push.42 assert_eq
+
+    # Push a recognisable success marker so the value table contains
+    # the literal 999.
+    push.999
+end
+
+begin
+    exec.checks
+    drop
+end
