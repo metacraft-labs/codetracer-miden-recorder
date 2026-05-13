@@ -111,8 +111,8 @@ fn test_transaction_inputs_with_note() {
 
 #[test]
 fn test_transaction_inputs_with_tx_script() {
-    let inputs = TransactionInputs::synthetic(0x1000, 42)
-        .with_tx_script("begin push.1 push.2 add end");
+    let inputs =
+        TransactionInputs::synthetic(0x1000, 42).with_tx_script("begin push.1 push.2 add end");
 
     assert_eq!(
         inputs.tx_args.tx_script.as_deref(),
@@ -239,9 +239,7 @@ fn test_replay_data_store_get_transaction_inputs() {
         metadata: NoteMetadata::default(),
     });
 
-    let inputs = store
-        .get_transaction_inputs(0x1000, 50, &[1, 2])
-        .unwrap();
+    let inputs = store.get_transaction_inputs(0x1000, 50, &[1, 2]).unwrap();
 
     assert_eq!(inputs.account.id, 0x1000);
     assert_eq!(inputs.account.nonce, 3);
@@ -270,9 +268,7 @@ fn test_replay_data_store_note_not_found() {
         is_public: true,
     });
 
-    let err = store
-        .get_transaction_inputs(0x1000, 0, &[999])
-        .unwrap_err();
+    let err = store.get_transaction_inputs(0x1000, 0, &[999]).unwrap_err();
     assert!(matches!(err, ReplayError::InputsNotAvailable(_)));
 }
 
@@ -394,9 +390,11 @@ fn test_replay_pipeline_synthetic() {
     // Step 2: Capture inputs to disk.
     let captured_path = capture_transaction_inputs(&inputs, &capture_dir).unwrap();
     assert!(captured_path.exists());
-    assert!(captured_path
-        .to_string_lossy()
-        .contains("tx_inputs_0x1000_block_42.json"));
+    assert!(
+        captured_path
+            .to_string_lossy()
+            .contains("tx_inputs_0x1000_block_42.json")
+    );
 
     // Step 3: Verify we can load the captured file.
     let loaded_json = std::fs::read_to_string(&captured_path).unwrap();
@@ -446,9 +444,10 @@ fn test_capture_transaction_inputs() {
     let path = capture_transaction_inputs(&inputs, &capture_dir).unwrap();
 
     assert!(path.exists());
-    assert!(path
-        .to_string_lossy()
-        .contains("tx_inputs_0xabcd_block_77.json"));
+    assert!(
+        path.to_string_lossy()
+            .contains("tx_inputs_0xabcd_block_77.json")
+    );
 
     // Verify the file content is valid JSON that roundtrips.
     let json = std::fs::read_to_string(&path).unwrap();
@@ -549,7 +548,10 @@ fn test_replay_error_variants() {
     for err in &errors {
         let msg = err.to_string();
         assert!(!msg.is_empty(), "Error message should not be empty");
-        assert!(msg.contains("test"), "Error message should contain inner msg");
+        assert!(
+            msg.contains("test"),
+            "Error message should contain inner msg"
+        );
     }
 }
 

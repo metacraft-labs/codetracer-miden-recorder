@@ -150,10 +150,7 @@ fn test_real_block_header_populates_synthetic() {
     };
 
     // Genesis block may have timestamp 0 or non-zero depending on MockChain.
-    assert_eq!(
-        synthetic.block_num, block_num,
-        "block number should match"
-    );
+    assert_eq!(synthetic.block_num, block_num, "block number should match");
 }
 
 // ---------------------------------------------------------------------------
@@ -180,10 +177,7 @@ fn test_real_derived_inputs_json_roundtrip() {
     assert_eq!(parsed.account.id, inputs.account.id);
     assert_eq!(parsed.account.nonce, inputs.account.nonce);
     assert_eq!(parsed.block_header.block_num, inputs.block_header.block_num);
-    assert_eq!(
-        parsed.block_header.timestamp,
-        inputs.block_header.timestamp
-    );
+    assert_eq!(parsed.block_header.timestamp, inputs.block_header.timestamp);
     assert_eq!(parsed.account.is_public, inputs.account.is_public);
 }
 
@@ -302,12 +296,7 @@ fn test_real_note_populates_synthetic_input_note() {
     let asset = FungibleAsset::mock(100);
 
     let note = builder
-        .add_p2id_note(
-            sender.id(),
-            receiver.id(),
-            &[asset],
-            NoteType::Public,
-        )
+        .add_p2id_note(sender.id(), receiver.id(), &[asset], NoteType::Public)
         .expect("failed to create P2ID note");
 
     let chain = builder.build().expect("failed to build chain");
@@ -338,15 +327,8 @@ fn test_real_note_populates_synthetic_input_note() {
         synthetic_note.id, 0,
         "real-derived note ID should be non-zero"
     );
-    assert_eq!(
-        synthetic_note.assets.len(),
-        1,
-        "should have one asset"
-    );
-    assert_eq!(
-        synthetic_note.assets[0].1, 100,
-        "asset amount should match"
-    );
+    assert_eq!(synthetic_note.assets.len(), 1, "should have one asset");
+    assert_eq!(synthetic_note.assets[0].1, 100, "asset amount should match");
 }
 
 // ---------------------------------------------------------------------------
@@ -368,12 +350,7 @@ fn test_capture_replay_with_real_derived_notes() {
     let asset = FungibleAsset::mock(250);
 
     let note = builder
-        .add_p2id_note(
-            sender.id(),
-            receiver.id(),
-            &[asset],
-            NoteType::Public,
-        )
+        .add_p2id_note(sender.id(), receiver.id(), &[asset], NoteType::Public)
         .expect("failed to create note");
 
     let _chain = builder.build().expect("failed to build chain");
@@ -615,10 +592,8 @@ async fn test_real_tx_execution_compatible_with_replay() {
     let captured_path =
         capture_transaction_inputs(&inputs, tmp_dir.path()).expect("capture should succeed");
 
-    let loaded = TransactionInputs::from_json(
-        &std::fs::read_to_string(&captured_path).unwrap(),
-    )
-    .expect("should parse captured inputs");
+    let loaded = TransactionInputs::from_json(&std::fs::read_to_string(&captured_path).unwrap())
+        .expect("should parse captured inputs");
 
     assert_eq!(loaded.account.id, account_id_to_u64(receiver.id()));
     assert_eq!(loaded.block_header.block_num, block_num);
@@ -640,11 +615,7 @@ fn test_real_get_transaction_inputs_from_mockchain() {
 
     // Use MockChain's real get_transaction_inputs method.
     let real_tx_inputs = chain
-        .get_transaction_inputs(
-            chain.committed_account(wallet.id()).unwrap(),
-            &[],
-            &[],
-        )
+        .get_transaction_inputs(chain.committed_account(wallet.id()).unwrap(), &[], &[])
         .expect("should get real TransactionInputs");
 
     // Extract data from the real TransactionInputs.
@@ -811,13 +782,16 @@ async fn test_multiple_captures_from_sequential_real_txs() {
     // Both captures should exist and be different.
     assert!(path_1.exists());
     assert!(path_2.exists());
-    assert_ne!(path_1, path_2, "different blocks should produce different filenames");
+    assert_ne!(
+        path_1, path_2,
+        "different blocks should produce different filenames"
+    );
 
     // Nonces should advance between captures.
-    let loaded_1 = TransactionInputs::from_json(&std::fs::read_to_string(&path_1).unwrap())
-        .expect("parse 1");
-    let loaded_2 = TransactionInputs::from_json(&std::fs::read_to_string(&path_2).unwrap())
-        .expect("parse 2");
+    let loaded_1 =
+        TransactionInputs::from_json(&std::fs::read_to_string(&path_1).unwrap()).expect("parse 1");
+    let loaded_2 =
+        TransactionInputs::from_json(&std::fs::read_to_string(&path_2).unwrap()).expect("parse 2");
 
     assert!(
         loaded_2.account.nonce > loaded_1.account.nonce,
@@ -865,8 +839,7 @@ async fn test_tx_context_execute_code_with_capture() {
 
     // Capture the execution context as synthetic TransactionInputs.
     // This simulates what an instrumented client would do.
-    let inputs = TransactionInputs::synthetic(0x1000, 1)
-        .with_tx_script("push.100 push.200 add");
+    let inputs = TransactionInputs::synthetic(0x1000, 1).with_tx_script("push.100 push.200 add");
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let captured_path =

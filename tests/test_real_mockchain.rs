@@ -73,12 +73,7 @@ fn test_real_mockchain_with_p2id_note() {
     let asset = FungibleAsset::mock(100);
 
     let note = builder
-        .add_p2id_note(
-            sender.id(),
-            receiver.id(),
-            &[asset],
-            NoteType::Public,
-        )
+        .add_p2id_note(sender.id(), receiver.id(), &[asset], NoteType::Public)
         .expect("failed to create P2ID note");
 
     let chain = builder.build().expect("failed to build chain");
@@ -177,10 +172,7 @@ fn test_real_mockchain_faucet_with_supply() {
         .expect("faucet should exist");
 
     // Faucet account should exist and be valid.
-    assert!(
-        faucet_account.is_faucet(),
-        "account should be a faucet"
-    );
+    assert!(faucet_account.is_faucet(), "account should be a faucet");
 }
 
 // ---------------------------------------------------------------------------
@@ -204,21 +196,11 @@ fn test_real_mockchain_multiple_accounts_and_notes() {
     let asset = FungibleAsset::mock(50);
 
     let note_1 = builder
-        .add_p2id_note(
-            faucet.id(),
-            wallet_a.id(),
-            &[asset],
-            NoteType::Public,
-        )
+        .add_p2id_note(faucet.id(), wallet_a.id(), &[asset], NoteType::Public)
         .expect("failed to create note 1");
 
     let note_2 = builder
-        .add_p2id_note(
-            faucet.id(),
-            wallet_b.id(),
-            &[asset],
-            NoteType::Public,
-        )
+        .add_p2id_note(faucet.id(), wallet_b.id(), &[asset], NoteType::Public)
         .expect("failed to create note 2");
 
     let chain = builder.build().expect("failed to build chain");
@@ -252,12 +234,7 @@ async fn test_real_block_production() {
     let asset = FungibleAsset::mock(200);
 
     let note = builder
-        .add_p2id_note(
-            sender.id(),
-            receiver.id(),
-            &[asset],
-            NoteType::Public,
-        )
+        .add_p2id_note(sender.id(), receiver.id(), &[asset], NoteType::Public)
         .expect("failed to create note");
 
     let mut chain = builder.build().expect("failed to build chain");
@@ -318,14 +295,8 @@ async fn test_real_execute_code_in_tx_context() {
 
     // Verify the stack has the expected value.
     let stack_ints = exec_output.stack.as_int_vec();
-    assert!(
-        !stack_ints.is_empty(),
-        "stack should not be empty"
-    );
-    assert_eq!(
-        stack_ints[0], 42,
-        "stack top should be 42 after pushing it"
-    );
+    assert!(!stack_ints.is_empty(), "stack should not be empty");
+    assert_eq!(stack_ints[0], 42, "stack top should be 42 after pushing it");
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +320,9 @@ fn test_kernel_proc_detection_with_real_patterns() {
 
     // Account-related kernel procedures.
     assert!(is_kernel_procedure("miden::kernel::get_account_id"));
-    assert!(is_kernel_procedure("miden::kernel::account_vault_add_asset"));
+    assert!(is_kernel_procedure(
+        "miden::kernel::account_vault_add_asset"
+    ));
 
     // Note-related kernel procedures.
     assert!(is_kernel_procedure("miden::note::get_inputs"));
@@ -435,7 +408,11 @@ fn test_context_tracking_mirrors_real_tx_phases() {
     assert!(tracker.is_in_kernel());
 
     // Verify we tracked all context IDs.
-    assert_eq!(tracker.context_count(), 4, "should have 4 distinct contexts");
+    assert_eq!(
+        tracker.context_count(),
+        4,
+        "should have 4 distinct contexts"
+    );
 
     // Verify the switch history is complete.
     let history = tracker.switch_history();
@@ -507,21 +484,11 @@ async fn test_real_multiple_sequential_transactions() {
     let asset_b = FungibleAsset::mock(200);
 
     let note_a = builder
-        .add_p2id_note(
-            sender.id(),
-            receiver_a.id(),
-            &[asset_a],
-            NoteType::Public,
-        )
+        .add_p2id_note(sender.id(), receiver_a.id(), &[asset_a], NoteType::Public)
         .expect("failed to create note A");
 
     let note_b = builder
-        .add_p2id_note(
-            sender.id(),
-            receiver_b.id(),
-            &[asset_b],
-            NoteType::Public,
-        )
+        .add_p2id_note(sender.id(), receiver_b.id(), &[asset_b], NoteType::Public)
         .expect("failed to create note B");
 
     let mut chain = builder.build().expect("failed to build chain");
@@ -623,12 +590,7 @@ async fn test_real_new_account_creation() {
     let asset = FungibleAsset::mock(75);
 
     let note = builder
-        .add_p2id_note(
-            faucet.id(),
-            new_wallet.id(),
-            &[asset],
-            NoteType::Public,
-        )
+        .add_p2id_note(faucet.id(), new_wallet.id(), &[asset], NoteType::Public)
         .expect("failed to create note");
 
     let chain = builder.build().expect("failed to build chain");

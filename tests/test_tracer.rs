@@ -229,14 +229,8 @@ fn test_miden_variable_extraction() {
     );
 
     // Values should include known results from the program's procedures.
-    assert!(
-        values.contains(&55),
-        "should contain fibonacci(10) = 55"
-    );
-    assert!(
-        values.contains(&5040),
-        "should contain factorial(7) = 5040"
-    );
+    assert!(values.contains(&55), "should contain fibonacci(10) = 55");
+    assert!(values.contains(&5040), "should contain factorial(7) = 5040");
 }
 
 // ---------------------------------------------------------------------------
@@ -247,12 +241,24 @@ fn test_miden_variable_extraction() {
 fn test_miden_trace_event_types() {
     let events = run_tracer();
 
-    let has_steps = events.iter().any(|e| matches!(e, TraceLowLevelEvent::Step(_)));
-    let has_calls = events.iter().any(|e| matches!(e, TraceLowLevelEvent::Call(_)));
-    let has_returns = events.iter().any(|e| matches!(e, TraceLowLevelEvent::Return(_)));
-    let has_functions = events.iter().any(|e| matches!(e, TraceLowLevelEvent::Function(_)));
-    let has_values = events.iter().any(|e| matches!(e, TraceLowLevelEvent::Value(_)));
-    let has_paths = events.iter().any(|e| matches!(e, TraceLowLevelEvent::Path(_)));
+    let has_steps = events
+        .iter()
+        .any(|e| matches!(e, TraceLowLevelEvent::Step(_)));
+    let has_calls = events
+        .iter()
+        .any(|e| matches!(e, TraceLowLevelEvent::Call(_)));
+    let has_returns = events
+        .iter()
+        .any(|e| matches!(e, TraceLowLevelEvent::Return(_)));
+    let has_functions = events
+        .iter()
+        .any(|e| matches!(e, TraceLowLevelEvent::Function(_)));
+    let has_values = events
+        .iter()
+        .any(|e| matches!(e, TraceLowLevelEvent::Value(_)));
+    let has_paths = events
+        .iter()
+        .any(|e| matches!(e, TraceLowLevelEvent::Path(_)));
 
     assert!(has_steps, "trace should have Step events");
     assert!(has_calls, "trace should have Call events");
@@ -402,7 +408,10 @@ fn test_miden_stack_values() {
     assert!(values.contains(&5040), "should contain factorial(7) = 5040");
     assert!(values.contains(&42), "should contain 42 from max_of_three");
     assert!(values.contains(&10), "should contain 10 from array_sum");
-    assert!(values.contains(&125), "should contain 125 from arithmetic_demo");
+    assert!(
+        values.contains(&125),
+        "should contain 125 from arithmetic_demo"
+    );
 
     // Location-specific assertions: verify each value appears in events
     // associated with the correct procedure.
@@ -466,7 +475,8 @@ fn test_miden_fibonacci_value_at_location() {
     let fib_start = source_lines
         .iter()
         .position(|l| l.trim().starts_with("proc.fibonacci"))
-        .expect("should find proc.fibonacci") + 1;
+        .expect("should find proc.fibonacci")
+        + 1;
     let fib_body_end = source_lines[fib_start..]
         .iter()
         .position(|l| l.trim() == "end")
@@ -493,7 +503,8 @@ fn test_miden_fibonacci_value_at_location() {
     assert!(
         !fib_step_lines.is_empty(),
         "should have Step events within the fibonacci procedure (lines {}-{})",
-        fib_start, fib_body_end
+        fib_start,
+        fib_body_end
     );
 
     // Track values within fibonacci procedure context.
@@ -730,12 +741,14 @@ fn test_miden_conditional_branch_coverage() {
     assert!(
         !if_branch_covered.is_empty(),
         "should have Step events at if.true branch lines {:?}, ncf steps: {:?}",
-        if_branch_lines_1indexed, ncf_step_lines
+        if_branch_lines_1indexed,
+        ncf_step_lines
     );
     assert!(
         !else_branch_covered.is_empty(),
         "should have Step events at else branch lines {:?}, ncf steps: {:?}",
-        else_branch_lines_1indexed, ncf_step_lines
+        else_branch_lines_1indexed,
+        ncf_step_lines
     );
 }
 
@@ -896,8 +909,8 @@ fn record_and_dump_full(test_name: &str, program: &str) -> Option<(serde_json::V
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let doc: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .expect("ct-print --full should emit valid JSON");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ct-print --full should emit valid JSON");
 
     drop(tmp_dir);
     Some((doc, source_path))
@@ -1012,11 +1025,7 @@ fn assert_all_values_are_int(doc: &serde_json::Value) {
 
 /// Find the first step matching `predicate` and return the value of
 /// the named variable (or `None` if the variable is absent).
-fn first_var_in_step<'a, P>(
-    doc: &'a serde_json::Value,
-    varname: &str,
-    predicate: P,
-) -> Option<i64>
+fn first_var_in_step<'a, P>(doc: &'a serde_json::Value, varname: &str, predicate: P) -> Option<i64>
 where
     P: Fn(&serde_json::Value) -> bool,
 {
@@ -1049,9 +1058,10 @@ where
 /// iterations), and `repeat_acc → 28` (4 fixed iterations).
 #[test]
 fn test_control_flow_test_via_ct_print_full() {
-    let Some((doc, source_path)) =
-        record_and_dump_full("test_control_flow_test_via_ct_print_full", "control_flow_test.masm")
-    else {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_control_flow_test_via_ct_print_full",
+        "control_flow_test.masm",
+    ) else {
         return;
     };
 
@@ -1066,26 +1076,34 @@ fn test_control_flow_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    // The recorder now registers every procedure whose `context_name`
-    // surfaces during execution — including the entry point `#main`
-    // observed on the very first asmop (`push.8` inside `begin`).  The
-    // function-table order is writer-assignment order, which matches
-    // the order of first observation: `#main` (begin block), then the
-    // three procedures it `exec`s in declaration order.
+    // Every declared procedure is pre-registered in the function
+    // table from the static MASM-source pass (see
+    // `MidenTracer::process_vm_states`'s static-decl loop) — this lets
+    // assembler-inlined wrappers like `proc.compute.0 { exec.outer }`
+    // surface in the table even when their body is never observed at
+    // an asmop boundary.  The order is HashMap iteration order (no
+    // canonical guarantee) followed by `#main` last (registered when
+    // the begin-block context is first observed at runtime).
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
     assert_eq!(
-        functions,
+        sorted_functions,
         vec![
             "#exec::#main",
             "#exec::if_else_demo",
-            "#exec::while_sum",
             "#exec::repeat_acc",
+            "#exec::while_sum",
         ],
         "function table mismatch — has the assembler renamed the synthetic prefix?"
     );
 
     // ----- Counts ------------------------------------------------------
+    // 31 steps = 28 baseline + 3 extra for the per-iteration steps now
+    // emitted inside `repeat.4` (line 45 of repeat_acc fires 4 times
+    // instead of 1 — see
+    // `test_control_flow_repeat_emits_step_per_iteration`).
     let counts = &doc["counts"];
-    assert_eq!(counts["steps"].as_u64(), Some(28), "steps; counts={counts}");
+    assert_eq!(counts["steps"].as_u64(), Some(31), "steps; counts={counts}");
     assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
@@ -1094,42 +1112,41 @@ fn test_control_flow_test_via_ct_print_full() {
     );
     assert_eq!(
         counts["values"].as_u64(),
-        Some(28),
+        Some(31),
         "values; counts={counts}"
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 28 steps + 4 call_entry + 4 call_exit = 36 events.
-    assert_eq!(events.len(), 36, "events.len()");
+    // 31 steps + 4 call_entry + 4 call_exit = 39 events.
+    assert_eq!(events.len(), 39, "events.len()");
 
-    // ----- Call entry sequence (in observed order) --------------------
+    // ----- Call entry sequence ----------------------------------------
+    // `#main` is registered first as a synthesised call (the begin-
+    // block opens an outermost frame so end-of-trace LIFO drainage
+    // closes it last — see
+    // `test_control_flow_call_exit_strict_lifo`).  The three user
+    // procedures follow in source-order.
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "#exec::#main".to_string(),
             "#exec::if_else_demo".to_string(),
             "#exec::while_sum".to_string(),
             "#exec::repeat_acc".to_string(),
-            "#exec::#main".to_string(),
         ],
     );
 
     // ----- Call exit sequence -----------------------------------------
-    // RECORDER BUG: a spec-compliant trace would emit exits in
-    // strict LIFO order (innermost first).  The Miden recorder only
-    // emits an explicit Return when the *context_name* of the next
-    // asmop is observed to revert to a previously-seen value — and
-    // since `if_else_demo`'s body is a single basic block, its exit
-    // is observed inline; `while_sum` and `repeat_acc` are then
-    // closed in reverse `call_key` order at end-of-trace as the
-    // tracer drains its context_stack.  See the
-    // `test_control_flow_call_exit_strict_lifo` ignored test below.
+    // Strict LIFO (innermost-first): each user procedure closes when
+    // its sibling (or `#main`) takes the next asmop, and `#main`
+    // closes last via the recorder's final `register_return`.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "#exec::if_else_demo".to_string(),
-            "#exec::#main".to_string(),
-            "#exec::repeat_acc".to_string(),
             "#exec::while_sum".to_string(),
+            "#exec::repeat_acc".to_string(),
+            "#exec::#main".to_string(),
         ],
     );
 
@@ -1140,8 +1157,7 @@ fn test_control_flow_test_via_ct_print_full() {
     let if_else_call = events
         .iter()
         .find(|e| {
-            e["kind"] == "call_entry"
-                && e["function"].as_str() == Some("#exec::if_else_demo")
+            e["kind"] == "call_entry" && e["function"].as_str() == Some("#exec::if_else_demo")
         })
         .expect("if_else_demo call_entry");
     let args: Vec<(String, i64)> = if_else_call["args"]
@@ -1171,9 +1187,7 @@ fn test_control_flow_test_via_ct_print_full() {
     // captures the operand stack at the boundary.
     let while_call = events
         .iter()
-        .find(|e| {
-            e["kind"] == "call_entry" && e["function"].as_str() == Some("#exec::while_sum")
-        })
+        .find(|e| e["kind"] == "call_entry" && e["function"].as_str() == Some("#exec::while_sum"))
         .expect("while_sum call_entry");
     let s2_for_while = while_call["args"]
         .as_array()
@@ -1193,9 +1207,7 @@ fn test_control_flow_test_via_ct_print_full() {
     // (repeat_acc).
     let repeat_call = events
         .iter()
-        .find(|e| {
-            e["kind"] == "call_entry" && e["function"].as_str() == Some("#exec::repeat_acc")
-        })
+        .find(|e| e["kind"] == "call_entry" && e["function"].as_str() == Some("#exec::repeat_acc"))
         .expect("repeat_acc call_entry");
     let s1_for_repeat = repeat_call["args"]
         .as_array()
@@ -1212,10 +1224,15 @@ fn test_control_flow_test_via_ct_print_full() {
 
     // ----- repeat_acc result ------------------------------------------
     // 4 × 7 = 28.  Surfaces as `s0=15, s1=208` at #main; the 28 from
-    // repeat_acc is on `stack[0]` of #main's only step.
+    // repeat_acc is on `stack[0]` of #main's only step AFTER repeat_acc
+    // has returned.  We search for the last step in #main (the
+    // `drop drop drop` cleanup at line 64) — earlier #main steps are
+    // the begin-block dispatches (push.8/push.5/exec.repeat_acc) where
+    // `local[0]` is empty because no procedure has run yet.
     let main_step = events
         .iter()
-        .find(|e| e["kind"] == "step" && e["function"].as_str() == Some("#exec::#main"))
+        .filter(|e| e["kind"] == "step" && e["function"].as_str() == Some("#exec::#main"))
+        .next_back()
         .expect("step inside #main");
     let local0_at_main = main_step["vars"]
         .as_array()
@@ -1248,12 +1265,12 @@ fn test_control_flow_test_via_ct_print_full() {
     );
 
     // ----- repeat.N body iteration count ------------------------------
-    // The recorder collapses the repeat body into a single step
-    // (line 45) per "repeat.4" macro expansion — it observes the
-    // same source line on consecutive cycles but only emits one
-    // delta-step before the line changes.  RECORDER BUG: ideally
-    // each iteration would emit its own step event so the GUI's
-    // step-over works inside the repeat body.  Today we see 1.
+    // The recorder now emits one step per iteration of `repeat.N` by
+    // detecting backwards branches into the same source line (the
+    // `step_first_op` revisit signal in `process_vm_states`).  See
+    // `test_control_flow_repeat_emits_step_per_iteration` for the
+    // dedicated coverage; this assertion locks the same property
+    // here so the per-program ct-print --full coverage stays in sync.
     let repeat_body_steps = events
         .iter()
         .filter(|e| {
@@ -1262,18 +1279,18 @@ fn test_control_flow_test_via_ct_print_full() {
                 && e["line"].as_i64() == Some(45)
         })
         .count();
-    assert_eq!(repeat_body_steps, 1, "repeat.4 body collapses to 1 step today");
+    assert_eq!(
+        repeat_body_steps, 4,
+        "repeat.4 body emits one step per iteration"
+    );
 }
 
 #[test]
-#[ignore = "RECORDER BUG: call_exit ordering should be strict LIFO \
-            (innermost first), but the Miden recorder closes nested \
-            contexts in reverse-call_key order at end-of-trace.  Spec \
-            order: [if_else_demo, while_sum, repeat_acc, #main]."]
 fn test_control_flow_call_exit_strict_lifo() {
-    let Some((doc, _)) =
-        record_and_dump_full("test_control_flow_call_exit_strict_lifo", "control_flow_test.masm")
-    else {
+    let Some((doc, _)) = record_and_dump_full(
+        "test_control_flow_call_exit_strict_lifo",
+        "control_flow_test.masm",
+    ) else {
         return;
     };
     assert_eq!(
@@ -1288,10 +1305,6 @@ fn test_control_flow_call_exit_strict_lifo() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: each iteration of `repeat.N` should emit its \
-            own step event so the GUI's step-over advances one repeat \
-            iteration at a time.  Today the recorder collapses every \
-            iteration of line 45 into a single delta-step."]
 fn test_control_flow_repeat_emits_step_per_iteration() {
     let Some((doc, _)) = record_and_dump_full(
         "test_control_flow_repeat_emits_step_per_iteration",
@@ -1305,7 +1318,10 @@ fn test_control_flow_repeat_emits_step_per_iteration() {
         .iter()
         .filter(|e| e["kind"] == "step" && e["line"].as_i64() == Some(45))
         .count();
-    assert_eq!(body_steps, 4, "repeat.4 should produce 4 step events at line 45");
+    assert_eq!(
+        body_steps, 4,
+        "repeat.4 should produce 4 step events at line 45"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,9 +1338,10 @@ fn test_control_flow_repeat_emits_step_per_iteration() {
 /// `#[ignore]`d sibling test.
 #[test]
 fn test_nested_calls_test_via_ct_print_full() {
-    let Some((doc, source_path)) =
-        record_and_dump_full("test_nested_calls_test_via_ct_print_full", "nested_calls_test.masm")
-    else {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_nested_calls_test_via_ct_print_full",
+        "nested_calls_test.masm",
+    ) else {
         return;
     };
 
@@ -1338,28 +1355,41 @@ fn test_nested_calls_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    // RECORDER BUG: spec wants
-    //   ["#exec::compute", "#exec::outer", "#exec::middle", "#exec::inner", "#exec::#main"]
-    // — every defined-and-called procedure should appear.  The
-    // recorder now registers every procedure whose `context_name`
-    // surfaces during execution, so `inner` (the innermost frame and
-    // the first context observed) is captured.  `compute` and `outer`
-    // are still missing because the assembler collapses
-    // `exec.compute` → `exec.outer` → `exec.middle` into a single
-    // observed context (the assembler may inline / tail-call them so
-    // their bodies share the inner procedure's context name).  The
-    // strict `test_nested_calls_full_chain_registered` ignored test
-    // below pins the spec-compliant 4-deep nesting.
+    // The function table is populated by:
+    //   (a) a static MASM-source pre-registration pass that adds every
+    //       declared `proc.X.N` (so even assembler-inlined wrappers
+    //       like `compute` surface), and
+    //   (b) runtime context-name observations (which add `#main` for
+    //       the begin-block).
+    // Order is HashMap iteration order (no canonical guarantee) so we
+    // sort before comparing.  Compare-while-sorted keeps the assertion
+    // strict on the SET of procedures while not pinning a fragile
+    // iteration order.
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
     assert_eq!(
-        functions,
-        vec!["#exec::inner", "#exec::middle", "#exec::outer", "#exec::#main"],
-        "RECORDER BUG: only 4 of the 5 defined procedures register as functions \
-         (`compute` is never observed as a `context_name`)"
+        sorted_functions,
+        vec![
+            "#exec::#main",
+            "#exec::compute",
+            "#exec::inner",
+            "#exec::middle",
+            "#exec::outer",
+        ],
+        "function table should list every declared procedure plus `#main`"
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(5), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // 4 calls = compute + outer + middle + inner — every level of the
+    // 4-deep chain (the assembler inlines the wrappers but the
+    // recorder's static-source pre-pass synthesises a `register_call`
+    // for each ancestor of the first observed context, see
+    // `MidenTracer::process_vm_states`'s `chain_from_main` block).
+    // `#main` is NOT a call_entry: it surfaces only for the cleanup
+    // `drop` and the special drain branch closes the inlined chain
+    // back to toplevel without emitting a `register_call(#main)`.
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -1367,26 +1397,38 @@ fn test_nested_calls_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 5 step + 3 call_entry + 3 call_exit = 11.
-    assert_eq!(events.len(), 11, "events.len()");
+    // 5 step + 4 call_entry + 4 call_exit = 13.
+    assert_eq!(events.len(), 13, "events.len()");
 
+    // Both call_entry and call_exit appear in close-order (innermost
+    // first) because the multi-stream writer assigns `callKey` at
+    // `register_return` time, and ct-print iterates calls in `callKey`
+    // order.  The chain-synthesis pre-pass registers all four calls
+    // before any step is emitted (entry_step = 0), so they're all
+    // attached to step 0 and emitted in callKey order: inner closed
+    // first → callKey 0 → emitted first; compute closed last → callKey
+    // 3 → emitted last.  See
+    // `MidenTracer::process_vm_states`'s end-of-trace drain block.
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "#exec::inner".to_string(),
             "#exec::middle".to_string(),
             "#exec::outer".to_string(),
-            "#exec::#main".to_string(),
+            "#exec::compute".to_string(),
         ],
     );
 
-    // RECORDER BUG: same reverse-call_key exit order as
-    // control_flow_test (#main first, outermost last).
+    // Strict LIFO exit ordering: each frame closes when execution
+    // unwinds back through it (inner first, then middle, then outer,
+    // finally compute).
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
-            "#exec::#main".to_string(),
-            "#exec::outer".to_string(),
+            "#exec::inner".to_string(),
             "#exec::middle".to_string(),
+            "#exec::outer".to_string(),
+            "#exec::compute".to_string(),
         ],
     );
 
@@ -1394,15 +1436,9 @@ fn test_nested_calls_test_via_ct_print_full() {
     // Step at line 17 (body of inner) must show stack[0]=3 (1+2).
     // Step at line 22 (body of middle) must show stack[0]=13 (3+10).
     // Step at line 27 (body of outer/compute) must show stack[0]=113.
-    let stack0_line17 = first_var_in_step(&doc, "stack[0]", |e| {
-        e["line"].as_i64() == Some(17)
-    });
-    let stack0_line22 = first_var_in_step(&doc, "stack[0]", |e| {
-        e["line"].as_i64() == Some(22)
-    });
-    let stack0_line27 = first_var_in_step(&doc, "stack[0]", |e| {
-        e["line"].as_i64() == Some(27)
-    });
+    let stack0_line17 = first_var_in_step(&doc, "stack[0]", |e| e["line"].as_i64() == Some(17));
+    let stack0_line22 = first_var_in_step(&doc, "stack[0]", |e| e["line"].as_i64() == Some(22));
+    let stack0_line27 = first_var_in_step(&doc, "stack[0]", |e| e["line"].as_i64() == Some(27));
     assert_eq!(
         stack0_line17,
         Some(0),
@@ -1417,15 +1453,11 @@ fn test_nested_calls_test_via_ct_print_full() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: the 4-deep call chain compute → outer → \
-            middle → inner should produce 4 call_entry events with \
-            distinct function names.  Today the recorder only records \
-            3 levels and drops `inner` and `compute` from the \
-            functions table."]
 fn test_nested_calls_full_chain_registered() {
-    let Some((doc, _)) =
-        record_and_dump_full("test_nested_calls_full_chain_registered", "nested_calls_test.masm")
-    else {
+    let Some((doc, _)) = record_and_dump_full(
+        "test_nested_calls_full_chain_registered",
+        "nested_calls_test.masm",
+    ) else {
         return;
     };
     let functions: Vec<&str> = doc["functions"]
@@ -1462,9 +1494,10 @@ fn test_nested_calls_full_chain_registered() {
 /// `mem_reader`).  The recorder pins the exact decoded sum.
 #[test]
 fn test_memory_ops_test_via_ct_print_full() {
-    let Some((doc, source_path)) =
-        record_and_dump_full("test_memory_ops_test_via_ct_print_full", "memory_ops_test.masm")
-    else {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_memory_ops_test_via_ct_print_full",
+        "memory_ops_test.masm",
+    ) else {
         return;
     };
 
@@ -1478,15 +1511,15 @@ fn test_memory_ops_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    // The recorder registers every procedure whose `context_name`
-    // surfaces during execution, including `mem_writer` (the first
-    // context observed — the begin block dispatches straight into
-    // its body) and `mem_reader` (entered after mem_writer returns).
+    // Every declared procedure is pre-registered (static MASM-source
+    // pass) and `#main` is added when the begin-block is observed.
+    // Order is HashMap iteration order so we sort before comparing.
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
     assert_eq!(
-        functions,
-        vec!["#exec::mem_writer", "#exec::mem_reader", "#exec::#main"],
-        "function table should list every observed procedure in \
-         first-observation order"
+        sorted_functions,
+        vec!["#exec::#main", "#exec::mem_reader", "#exec::mem_writer"],
+        "function table should list every declared procedure plus `#main`"
     );
 
     let counts = &doc["counts"];
@@ -1580,9 +1613,10 @@ fn test_memory_ops_test_via_ct_print_full() {
 
 #[test]
 fn test_memory_ops_mem_writer_registered() {
-    let Some((doc, _)) =
-        record_and_dump_full("test_memory_ops_mem_writer_registered", "memory_ops_test.masm")
-    else {
+    let Some((doc, _)) = record_and_dump_full(
+        "test_memory_ops_mem_writer_registered",
+        "memory_ops_test.masm",
+    ) else {
         return;
     };
     let functions: Vec<&str> = doc["functions"]
@@ -1623,15 +1657,15 @@ fn test_assertions_pass_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    // The recorder registers every procedure whose `context_name`
-    // surfaces during execution, including `checks` (the first
-    // context observed — the begin block dispatches straight into
-    // its body) and `#main` (re-entered after `checks` returns).
+    // Every declared procedure is pre-registered (static MASM-source
+    // pass) and `#main` is added when the begin-block is observed.
+    // Order is HashMap iteration order so we sort before comparing.
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
     assert_eq!(
-        functions,
-        vec!["#exec::checks", "#exec::#main"],
-        "function table should list every observed procedure in \
-         first-observation order"
+        sorted_functions,
+        vec!["#exec::#main", "#exec::checks"],
+        "function table should list every declared procedure plus `#main`"
     );
 
     let counts = &doc["counts"];
@@ -1835,9 +1869,10 @@ fn test_assertion_fail_records_boom_function() {
 /// only step.
 #[test]
 fn test_stack_manip_test_via_ct_print_full() {
-    let Some((doc, source_path)) =
-        record_and_dump_full("test_stack_manip_test_via_ct_print_full", "stack_manip_test.masm")
-    else {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_stack_manip_test_via_ct_print_full",
+        "stack_manip_test.masm",
+    ) else {
         return;
     };
 
@@ -1851,15 +1886,15 @@ fn test_stack_manip_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    // The recorder registers every procedure whose `context_name`
-    // surfaces during execution, including `shuffle` (the first
-    // context observed — the begin block dispatches straight into
-    // its body) and `#main` (re-entered after `shuffle` returns).
+    // Every declared procedure is pre-registered (static MASM-source
+    // pass) and `#main` is added when the begin-block is observed.
+    // Order is HashMap iteration order so we sort before comparing.
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
     assert_eq!(
-        functions,
-        vec!["#exec::shuffle", "#exec::#main"],
-        "function table should list every observed procedure in \
-         first-observation order"
+        sorted_functions,
+        vec!["#exec::#main", "#exec::shuffle"],
+        "function table should list every declared procedure plus `#main`"
     );
 
     let counts = &doc["counts"];
@@ -1931,9 +1966,10 @@ fn test_stack_manip_test_via_ct_print_full() {
 
 #[test]
 fn test_stack_manip_shuffle_registered() {
-    let Some((doc, _)) =
-        record_and_dump_full("test_stack_manip_shuffle_registered", "stack_manip_test.masm")
-    else {
+    let Some((doc, _)) = record_and_dump_full(
+        "test_stack_manip_shuffle_registered",
+        "stack_manip_test.masm",
+    ) else {
         return;
     };
     let functions: Vec<&str> = doc["functions"]

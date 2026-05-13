@@ -107,8 +107,14 @@ fn test_source_language_detection() {
         SourceLanguage::Masm
     );
     // Edge cases
-    assert_eq!(SourceLanguage::from_path("file.RS"), SourceLanguage::Unknown);
-    assert_eq!(SourceLanguage::from_path("file.MASM"), SourceLanguage::Unknown);
+    assert_eq!(
+        SourceLanguage::from_path("file.RS"),
+        SourceLanguage::Unknown
+    );
+    assert_eq!(
+        SourceLanguage::from_path("file.MASM"),
+        SourceLanguage::Unknown
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -117,8 +123,8 @@ fn test_source_language_detection() {
 
 #[test]
 fn test_synthetic_location_filtering() {
-    use std::sync::Arc;
     use miden_core::debuginfo::{ByteIndex, Location};
+    use std::sync::Arc;
 
     // A normal location with a real path and nonzero offsets is not synthetic.
     let normal_loc = Location::new(
@@ -132,11 +138,7 @@ fn test_synthetic_location_filtering() {
     );
 
     // A location with an empty path is synthetic.
-    let empty_path_loc = Location::new(
-        Arc::from(""),
-        ByteIndex::new(0),
-        ByteIndex::new(0),
-    );
+    let empty_path_loc = Location::new(Arc::from(""), ByteIndex::new(0), ByteIndex::new(0));
     assert!(
         is_synthetic_location(&empty_path_loc),
         "empty path location should be synthetic"
@@ -183,7 +185,10 @@ fn test_rust_source_resolver_finds_file() {
 
     // Should find the file by filename when given a non-existent absolute path.
     let result = resolver.resolve("/original/build/path/lib.rs");
-    assert!(result.is_some(), "resolver should find lib.rs in search dir");
+    assert!(
+        result.is_some(),
+        "resolver should find lib.rs in search dir"
+    );
     assert_eq!(result.unwrap(), rs_path);
 }
 

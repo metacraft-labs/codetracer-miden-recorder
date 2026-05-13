@@ -330,57 +330,63 @@ fn test_recorded_trace_via_ct_print_json() {
     // ----- Step / call counts ----------------------------------------
     // The Miden recorder emits one step per source-line transition for
     // each cycle that carries an AsmOp (skipping the duplicate inner
-    // cycles of multi-cycle ops).  For `compute.masm` that's a stable
-    // 178 step events and 13 call_entry events (10 named procedures
-    // plus 3 nested calls the context-name tracker observes inside
-    // memory_word_ops).  These are stable properties of the canonical
-    // fixture — if they change, that's a real regression to
-    // investigate, not a flake.
+    // cycles of multi-cycle ops), plus one extra step per detected
+    // backwards branch into the same source line so `repeat.N` bodies
+    // surface one step per iteration (see
+    // `test_control_flow_repeat_emits_step_per_iteration`).  For
+    // `compute.masm` that's a stable 180 step events and 11
+    // call_entry events: one synthesised `#main` for the begin-block
+    // (registered when `#main` is the first observed context — see
+    // `test_control_flow_call_exit_strict_lifo`) plus 10 user-procedure
+    // calls (the assembler dispatches each procedure once, with
+    // sibling collapse closing each before the next opens; the
+    // duplicate `nested_control_flow` is invoked twice from the
+    // begin-block).  The two extra steps over the pre-iteration-fix
+    // baseline come from the single-line `repeat.3` body in
+    // `nested_control_flow` (line 196 emits 3 steps now instead of
+    // 1).  These are stable properties of the canonical fixture — if
+    // they change, that's a real regression to investigate, not a
+    // flake.
     let counts = &doc["counts"];
     assert_eq!(
         counts["steps"].as_u64(),
-        Some(178),
-        "expected 178 step events for compute.masm; counts={counts}",
+        Some(180),
+        "expected 180 step events for compute.masm; counts={counts}",
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(13),
-        "expected 13 call events for compute.masm; counts={counts}",
+        Some(11),
+        "expected 11 call events for compute.masm; counts={counts}",
     );
 
     let events = doc["events"].as_array().expect("events array");
 
     // ----- Call sequence: every call_entry now resolves to a named
     // procedure.  The `begin` block dispatches procedures in this
-    // exact order; the recorder's context-tracking emits a
-    // `call_entry` the first time each procedure's context_name
-    // appears, plus additional events when the assembler-emitted
-    // basic-block boundaries inside `memory_word_ops` /
-    // `nested_control_flow` flip the context_name back to a parent.
-    // Pre-fix two of these trailing events carried out-of-range
-    // function ids (the recorder re-registered the same procedure
-    // from a different asmop line, minting fresh ids that didn't map
-    // back to the interned name); post-fix the dedup cache routes
-    // every call to its stable id, so all 13 events resolve to names.
+    // exact order.  The first event is the synthesised `#main` (see
+    // `test_control_flow_call_exit_strict_lifo`); the remaining 10
+    // entries are the user procedures observed in source order, with
+    // siblings (max_of_three → array_sum, bitwise_ops →
+    // stack_manipulation, arithmetic_demo → memory_word_ops) handled
+    // by the call-graph-driven sibling-collapse logic so each is
+    // closed before the next opens.
     let named_call_sequence: Vec<&str> = events
         .iter()
         .filter(|e| e["kind"] == "call_entry")
         .filter_map(|e| e["function"].as_str())
         .collect();
     let expected_call_sequence: &[&str] = &[
+        "::#main",
         "::fibonacci",
         "::factorial",
         "::max_of_three",
         "::array_sum",
-        "::#main",
         "::bitwise_ops",
         "::stack_manipulation",
-        "::#main",
         "::nested_control_flow",
         "::nested_control_flow",
         "::arithmetic_demo",
         "::memory_word_ops",
-        "::#main",
     ];
     assert_eq!(
         named_call_sequence.len(),

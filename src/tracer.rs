@@ -3,7 +3,7 @@
 //! Steps through a Miden program using `execute_iter` and emits
 //! CodeTracer trace events (steps, calls, returns, variables).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use codetracer_trace_types::{EventLogKind, FunctionId, Line, NONE_VALUE, TypeKind, ValueRecord};
@@ -138,26 +138,76 @@ impl MidenTracer {
 
         // Parse num_locals for each procedure from the MASM source.
         let proc_locals = parse_proc_locals(source_map.source_code());
+        // Parse the static call graph so we can disambiguate "deeper
+        // call" from "sibling-after-return" at runtime — see
+        // `parse_call_graph`'s docs.
+        let call_graph = parse_call_graph(source_map.source_code());
+        let parent_map = build_parent_map(&call_graph);
+
+        // Pre-register every declared procedure in the function table.
+        // The runtime context-name observation only surfaces procedures
+        // whose body is actually executed at an asmop boundary; the
+        // assembler may inline thin wrappers (e.g. `proc.compute.0 {
+        // exec.outer }`) so their bodies share the inlined callee's
+        // context name.  Without this static-decl pass, those inlined
+        // procedures are silently dropped from the functions table —
+        // see `test_nested_calls_full_chain_registered`.  We use the
+        // same `#exec::` prefix the runtime would assign so the
+        // function lookups stay consistent.
+        let mut function_ids: HashMap<String, FunctionId> = HashMap::new();
+        for proc_name in proc_locals.keys() {
+            let prefixed = format!("#exec::{}", proc_name);
+            let fid =
+                TraceWriter::ensure_function_id(&mut *self.writer, &prefixed, source_path, Line(1));
+            function_ids.insert(prefixed, fid);
+        }
 
         // Tracking state between iterations.
         let mut prev_line: Option<u32> = None;
         let mut prev_context_name: Option<String> = None;
+        // The op_str that started the most recent step we emitted.  When
+        // execution stays on the same line but revisits this op_str
+        // AFTER having moved past it (saw a different op since the
+        // step), it means a `repeat.N` body (or any other backwards
+        // branch into the same source line) has wrapped to a new
+        // iteration — without this signal the line-change dedup below
+        // would collapse every iteration into a single step event,
+        // which the GUI's step-over cannot navigate through.  Requiring
+        // `step_moved_past_first` guards against legitimate single-line
+        // bodies where the same op appears twice in a row (e.g. `add
+        // add` on one line) without an actual loop-back. See
+        // `test_control_flow_repeat_emits_step_per_iteration`.
+        let mut step_first_op: Option<String> = None;
+        let mut step_moved_past_first: bool = false;
         // Track which local memory slots have been written.
         let mut active_locals: HashMap<u32, ()> = HashMap::new();
         // Stack of context names for call/return tracking.
         let mut context_stack: Vec<String> = Vec::new();
         // Current procedure's num_locals for memory address calculation.
         let mut current_num_locals: u16 = 0;
-        // Cache of FunctionId per context_name so repeated
-        // ensure_function_id() calls for the same procedure return the
-        // same writer-level id.  The Nim FFI keys the function table on
-        // (name, path, line); without this cache, registering the same
-        // procedure from two different asmop lines (e.g. on re-entry)
-        // would create a SECOND function entry whose id no longer maps
-        // to the interned name in the multi-stream `functions` table,
-        // breaking ct-print's function-name lookup for `call_entry`
-        // events.
-        let mut function_ids: HashMap<String, FunctionId> = HashMap::new();
+        // (`function_ids` cache is initialised above with the static
+        // pre-registration of every declared procedure — see the
+        // `proc_locals` loop above.)  This cache deduplicates by
+        // `context_name`: the Nim FFI's `ensure_function_id` keys on
+        // (name, path, line), so calling it from a *different* asmop
+        // line for the same procedure would otherwise mint a fresh,
+        // non-interned function id (a writer-level quirk that bites
+        // the inner call-emitting branch below if the same procedure
+        // is re-entered from a different asmop boundary).
+        // Set when the recorder synthesised an explicit
+        // `register_call(#main)` for the begin-block — we need to emit
+        // a matching `register_return` after the main loop so the
+        // call/return event count stays balanced (and the writer's
+        // call stack closes #main before the final
+        // close-the-toplevel-frame return below).
+        let mut synthesised_main_call = false;
+        // Set when the recorder synthesised an inlined-chain
+        // `register_call` for the leaf procedure observed first (e.g.
+        // `inner` in `nested_calls_test`).  The intermediate callers
+        // are pushed onto `context_stack`; the leaf is the writer's
+        // current top.  We need an extra `register_return` at end-of-
+        // trace to close the leaf, mirroring the synthesised call.
+        let mut synthesised_chain_leaf = false;
 
         // Tracks whether the VM iterator surfaced an execution error; if so we
         // route it through `register_special_event(Error, ...)` so the
@@ -241,6 +291,77 @@ impl MidenTracer {
                     fid
                 };
 
+                if prev_context_name.is_none() {
+                    let bare = bare_proc_name(&context_name);
+                    if bare == "#main" {
+                        // Synthesise an explicit `register_call` for
+                        // the implicit `#main` (the begin-block) when
+                        // it is the first observed context.  Without
+                        // this, the LIFO exit ordering test cannot
+                        // satisfy the "outermost-closed-last"
+                        // invariant — `#main` would never appear on
+                        // the writer's call stack, so the
+                        // end-of-trace drain would close child
+                        // procedures (drained from `context_stack`)
+                        // instead of #main.  The complement is the
+                        // explicit `register_return` for `#main` at
+                        // end-of-trace below; together they encode
+                        // `#main` as a real outermost call frame.
+                        // See `test_control_flow_call_exit_strict_lifo`.
+                        TraceWriter::register_call(&mut *self.writer, new_fn_id, vec![]);
+                        synthesised_main_call = true;
+                    } else if let Some(chain) = chain_from_main(&parent_map, bare) {
+                        // The first observed context is buried under a
+                        // chain of inlined wrappers (`compute → outer →
+                        // middle → inner` where the assembler skipped
+                        // every transition above `inner`).  Synthesise
+                        // a `register_call` for every ancestor in the
+                        // chain (excluding the implicit `#main`
+                        // toplevel) so the inlined wrappers surface as
+                        // call frames at runtime.  `context_stack`
+                        // gets the chain's intermediate callers (so
+                        // the natural `register_return` flow when
+                        // execution unwinds back through `middle →
+                        // outer → ...` matches the synthesised
+                        // depths).  See
+                        // `test_nested_calls_full_chain_registered`.
+                        if chain.len() > 2 {
+                            // Skip first (`#main`) and last (already
+                            // emitted by the natural-call path below
+                            // via `new_fn_id` register_call …
+                            // actually no — we need to register the
+                            // entire chain here including the leaf,
+                            // because the `if let Some(ref prev_ctx)`
+                            // branch below is gated on a non-None
+                            // prev_context_name).  So we emit a call
+                            // for `#main`'s child through to the leaf
+                            // (inclusive); the recorder's state only
+                            // tracks depth via context_stack so the
+                            // intermediate callers (everything except
+                            // the leaf) get pushed.
+                            for ancestor in &chain[1..chain.len() - 1] {
+                                let prefixed = format!("#exec::{}", ancestor);
+                                let fid =
+                                    function_ids.get(&prefixed).copied().unwrap_or_else(|| {
+                                        let f = TraceWriter::ensure_function_id(
+                                            &mut *self.writer,
+                                            &prefixed,
+                                            source_path,
+                                            Line(line as i64),
+                                        );
+                                        function_ids.insert(prefixed.clone(), f);
+                                        f
+                                    });
+                                TraceWriter::register_call(&mut *self.writer, fid, vec![]);
+                                context_stack.push(prefixed);
+                            }
+                            // Finally register the call for the leaf
+                            // (the actually-observed first context).
+                            TraceWriter::register_call(&mut *self.writer, new_fn_id, vec![]);
+                            synthesised_chain_leaf = true;
+                        }
+                    }
+                }
                 if let Some(ref prev_ctx) = prev_context_name {
                     // Check if we are returning to a previous context.
                     if context_stack.last().map(|s| s.as_str()) == Some(&context_name) {
@@ -248,34 +369,117 @@ impl MidenTracer {
                         context_stack.pop();
                         let ret_val = NONE_VALUE;
                         TraceWriter::register_return(&mut *self.writer, ret_val);
-                    } else {
-                        // Entering a new context (call).
-                        context_stack.push(prev_ctx.clone());
-
-                        // Stage the visible operand-stack top as canonical
-                        // call args (audit checklist (c)). Miden has no
-                        // separate parameter list — procedures consume
-                        // arguments off the operand stack — so the top-of-
-                        // stack at the call boundary is the closest
-                        // analogue to the calling-convention argument
-                        // registers other recorders stage (PolkaVM 1.55
-                        // A0..A5; Cairo 1.50 ContractCall calldata).
-                        // We use names `s0`..`s3` to avoid colliding with
-                        // the per-step `stack[i]` variable dump below.
-                        // Pre-fix the recorder always passed `vec![]` here
-                        // — the calltrace pane showed every procedure with
-                        // empty arguments.
-                        let arg_depth = state.stack.len().min(4);
-                        for i in 0..arg_depth {
-                            let int_val = state.stack[i].as_int() as i64;
-                            let value = ValueRecord::Int {
-                                i: int_val,
-                                type_id: felt_type_id,
-                            };
-                            let _ = TraceWriter::arg(&mut *self.writer, &format!("s{i}"), value);
+                    } else if synthesised_chain_leaf
+                        && bare_proc_name(&context_name) == "#main"
+                        && !context_stack.iter().any(|c| bare_proc_name(c) == "#main")
+                    {
+                        // Inlined-chain end-of-trace: the begin-block
+                        // (`#main`) only surfaces for the cleanup
+                        // `drop drop drop` after the deepest call
+                        // chain unwinds.  Drain every still-open
+                        // synthesised frame (each pop on
+                        // `context_stack` matches a `register_return`
+                        // that closes the writer's current top), plus
+                        // one extra return for the outermost
+                        // synthesised caller (the entry on
+                        // `context_stack` we just popped maps to the
+                        // writer frame BELOW our current top — see
+                        // the trace in
+                        // `test_nested_calls_full_chain_registered`).
+                        // Do NOT register a `call_entry` for `#main`
+                        // here: it is the implicit toplevel and the
+                        // expected 4-call chain already accounts for
+                        // every distinct frame.
+                        while context_stack.pop().is_some() {
+                            TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
                         }
+                        // Close the leaf (the outermost synthesised
+                        // caller is now the writer's top).  We rely on
+                        // the unconditional `register_return` at end-
+                        // of-trace below to close the toplevel.
+                        TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
+                        // Mark the synthesised leaf as already closed
+                        // so the end-of-trace cleanup doesn't double-
+                        // emit a return for it.
+                        synthesised_chain_leaf = false;
+                    } else {
+                        // Disambiguate: is this a deeper call into `ctx`,
+                        // or a sibling transition where `prev` returned
+                        // and the same parent now invoked `ctx`?  We can
+                        // tell only when the call stack's top (the
+                        // current caller) is known via static MASM
+                        // parsing to invoke BOTH `prev` and `ctx` — in
+                        // that case the assembler skipped the implicit
+                        // return-to-parent boundary, so emit the missing
+                        // `register_return` for `prev` before opening
+                        // `ctx`.  This keeps `call_exit` ordering strict
+                        // LIFO (innermost first) for sequences like
+                        // `begin exec.A exec.B end` rather than draining
+                        // every sibling in reverse-callKey order at
+                        // end-of-trace.  See
+                        // `test_control_flow_call_exit_strict_lifo`.
+                        //
+                        // The fallback branch (push `prev`, open `ctx`)
+                        // handles genuinely deeper calls whose
+                        // intermediate frames the assembler inlined —
+                        // see `test_nested_calls_test_via_ct_print_full`
+                        // where `compute → outer → middle → inner`
+                        // surfaces only as the deepest context.
+                        let caller_invokes_both = context_stack
+                            .last()
+                            .and_then(|caller| call_graph.get(bare_proc_name(caller)))
+                            .map(|callees| {
+                                callees.contains(bare_proc_name(prev_ctx))
+                                    && callees.contains(bare_proc_name(&context_name))
+                            })
+                            .unwrap_or(false);
 
-                        TraceWriter::register_call(&mut *self.writer, new_fn_id, vec![]);
+                        if caller_invokes_both {
+                            // Sibling: close the previous call first.
+                            TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
+                            // Stage call args from the operand stack — same
+                            // logic as the deeper-call branch below.
+                            let arg_depth = state.stack.len().min(4);
+                            for i in 0..arg_depth {
+                                let int_val = state.stack[i].as_int() as i64;
+                                let value = ValueRecord::Int {
+                                    i: int_val,
+                                    type_id: felt_type_id,
+                                };
+                                let _ =
+                                    TraceWriter::arg(&mut *self.writer, &format!("s{i}"), value);
+                            }
+                            TraceWriter::register_call(&mut *self.writer, new_fn_id, vec![]);
+                        } else {
+                            // Entering a new context (call).
+                            context_stack.push(prev_ctx.clone());
+
+                            // Stage the visible operand-stack top as canonical
+                            // call args (audit checklist (c)). Miden has no
+                            // separate parameter list — procedures consume
+                            // arguments off the operand stack — so the top-of-
+                            // stack at the call boundary is the closest
+                            // analogue to the calling-convention argument
+                            // registers other recorders stage (PolkaVM 1.55
+                            // A0..A5; Cairo 1.50 ContractCall calldata).
+                            // We use names `s0`..`s3` to avoid colliding with
+                            // the per-step `stack[i]` variable dump below.
+                            // Pre-fix the recorder always passed `vec![]` here
+                            // — the calltrace pane showed every procedure with
+                            // empty arguments.
+                            let arg_depth = state.stack.len().min(4);
+                            for i in 0..arg_depth {
+                                let int_val = state.stack[i].as_int() as i64;
+                                let value = ValueRecord::Int {
+                                    i: int_val,
+                                    type_id: felt_type_id,
+                                };
+                                let _ =
+                                    TraceWriter::arg(&mut *self.writer, &format!("s{i}"), value);
+                            }
+
+                            TraceWriter::register_call(&mut *self.writer, new_fn_id, vec![]);
+                        }
                     }
                 }
                 // Update num_locals for the new context.
@@ -296,10 +500,28 @@ impl MidenTracer {
                 prev_context_name = Some(context_name.clone());
             }
 
-            // -- Emit step if line changed -----------------------------------------------
-            if prev_line != Some(line) {
+            // -- Emit step on line change OR loop-iteration restart ---------------------
+            // A `repeat.N` body whose instructions all live on the same
+            // source line revisits the FIRST op of that line on every
+            // iteration.  Detecting `op_str == step_first_op` while
+            // `line == prev_line` AND `step_moved_past_first` is the
+            // recorder's only signal that a backwards branch fired
+            // without crossing a line boundary — emit a step so the
+            // per-iteration step count matches the dynamic loop trip
+            // count.  The `moved_past_first` guard avoids false-firing
+            // on legitimate single-line bodies where the same op
+            // appears twice in a row (e.g. `add add` on one line).
+            // See `test_control_flow_repeat_emits_step_per_iteration`.
+            let line_changed = prev_line != Some(line);
+            let iteration_wrap =
+                !line_changed && step_moved_past_first && step_first_op.as_deref() == Some(op_str);
+            if line_changed || iteration_wrap {
                 TraceWriter::register_step(&mut *self.writer, source_path, Line(line as i64));
                 prev_line = Some(line);
+                step_first_op = Some(op_str.to_string());
+                step_moved_past_first = false;
+            } else if step_first_op.as_deref() != Some(op_str) {
+                step_moved_past_first = true;
             }
 
             // -- Track local memory slots ------------------------------------------------
@@ -371,6 +593,20 @@ impl MidenTracer {
             TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
         }
 
+        // If the recorder synthesised an explicit `register_call(#main)`
+        // at first-observation, close it now — its complement (see the
+        // call-detection block above).  This must precede the
+        // close-the-toplevel-frame return below so the writer's call
+        // stack drains in the right order.
+        if synthesised_main_call {
+            TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
+        }
+        // Same for the inlined-chain leaf: close it so the writer's
+        // call/return event count stays balanced.
+        if synthesised_chain_leaf {
+            TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
+        }
+
         // Emit the Return that closes the <toplevel> Call opened by start().
         // This must be unconditional: even if no VM states produced assembly
         // ops (empty program), the toplevel Call still needs to be closed.
@@ -408,6 +644,131 @@ fn parse_proc_locals(source: &str) -> HashMap<String, u16> {
         }
     }
     result
+}
+
+/// Parse the MASM call-graph: for each procedure body (and the implicit
+/// `#main` begin block), record the set of procedures it invokes via
+/// `exec.X`, `call.X`, or `syscall.X`.
+///
+/// This is used by the recorder's call/return detection to disambiguate
+/// "deeper call" (current logic) from "sibling-after-return" — when a
+/// context transition `prev → ctx` happens with the current call stack's
+/// top (the caller) known to invoke BOTH `prev` and `ctx`, it must be a
+/// sibling transition (the assembler skipped the intermediate return-to-
+/// parent boundary).  Without this signal the recorder would push `prev`
+/// onto the call stack and emit a `register_call(ctx)`, mis-nesting the
+/// trace.  See `test_control_flow_call_exit_strict_lifo`.
+///
+/// Procedure names are stored as bare identifiers (without the
+/// `#exec::` prefix the runtime adds); callers must strip that prefix
+/// before looking up.
+fn parse_call_graph(source: &str) -> HashMap<String, HashSet<String>> {
+    let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
+    // Tracks the currently-open procedure body.  `#main` is the implicit
+    // body of the `begin ... end` block (matches the runtime's
+    // `#exec::#main` context name minus the prefix).
+    let mut current: Option<String> = None;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        // Strip a trailing comment so `exec.foo # comment` still parses.
+        let code = match trimmed.find('#') {
+            Some(idx) => &trimmed[..idx],
+            None => trimmed,
+        };
+        let code = code.trim();
+        if code.is_empty() {
+            continue;
+        }
+        if code.starts_with("proc.") || code.starts_with("export.") {
+            // Format: proc.name.N or export.name.N
+            if let Some(name) = code.split('.').nth(1) {
+                current = Some(name.to_string());
+                graph.entry(name.to_string()).or_default();
+            }
+        } else if code == "begin" {
+            current = Some("#main".to_string());
+            graph.entry("#main".to_string()).or_default();
+        } else if code == "end" {
+            current = None;
+        } else if let Some(parent) = current.as_ref() {
+            // Tokenise on whitespace and look for `exec.X`, `call.X` or
+            // `syscall.X`.  Each token may be followed by `::path::name`
+            // for namespaced calls — keep just the final segment which
+            // is what the runtime surfaces as the bare context name.
+            for tok in code.split_whitespace() {
+                let callee = tok
+                    .strip_prefix("exec.")
+                    .or_else(|| tok.strip_prefix("call."))
+                    .or_else(|| tok.strip_prefix("syscall."));
+                if let Some(callee) = callee {
+                    let bare = callee.rsplit("::").next().unwrap_or(callee);
+                    graph.get_mut(parent).unwrap().insert(bare.to_string());
+                }
+            }
+        }
+    }
+    graph
+}
+
+/// Strip the runtime's `#exec::` prefix from a context name so it can be
+/// looked up in the source-parsed call graph.
+fn bare_proc_name(context_name: &str) -> &str {
+    context_name.rsplit("::").next().unwrap_or(context_name)
+}
+
+/// Invert a call graph into a parent map: child -> parent (the unique
+/// procedure that invokes `child` via `exec.child`).  Returns `None`
+/// for the entry's parent if the child has no caller in the source, or
+/// if it has multiple callers (in which case the static chain is
+/// ambiguous and we skip the chain-synthesis).
+fn build_parent_map(
+    call_graph: &HashMap<String, HashSet<String>>,
+) -> HashMap<String, Option<String>> {
+    let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+    for (caller, callees) in call_graph {
+        for callee in callees {
+            parents
+                .entry(callee.clone())
+                .or_default()
+                .push(caller.clone());
+        }
+    }
+    let mut result = HashMap::new();
+    for (child, callers) in parents {
+        if callers.len() == 1 {
+            result.insert(child, Some(callers.into_iter().next().unwrap()));
+        } else {
+            result.insert(child, None);
+        }
+    }
+    result
+}
+
+/// Walk the parent chain back to `#main` from a given procedure.
+/// Returns the chain in OUTERMOST-FIRST order, e.g. for nested_calls
+/// `chain_from_main("inner") = ["#main", "compute", "outer", "middle",
+/// "inner"]`.  Returns `None` when the chain is ambiguous (a child has
+/// multiple callers) or doesn't reach `#main` — the recorder then
+/// falls back to its observation-driven path.
+fn chain_from_main(parents: &HashMap<String, Option<String>>, leaf: &str) -> Option<Vec<String>> {
+    let mut chain = vec![leaf.to_string()];
+    let mut current = leaf.to_string();
+    // Bound the loop so a malformed source can't make us spin forever.
+    for _ in 0..256 {
+        match parents.get(&current) {
+            Some(Some(parent)) => {
+                if parent == "#main" {
+                    chain.push(parent.clone());
+                    chain.reverse();
+                    return Some(chain);
+                }
+                chain.push(parent.clone());
+                current = parent.clone();
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 #[cfg(test)]
