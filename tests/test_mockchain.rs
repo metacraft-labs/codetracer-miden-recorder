@@ -206,9 +206,7 @@ fn test_execution_context_tracking() {
     assert!(tracker.is_in_kernel());
 
     // Switch to note script context (context 1).
-    let note_kind = ContextKind::NoteScript {
-        note_id: NoteId(1),
-    };
+    let note_kind = ContextKind::NoteScript { note_id: NoteId(1) };
     tracker.switch_context(ContextId(1), note_kind.clone(), 100);
     assert_eq!(tracker.current(), Some(ContextId(1)));
     assert_eq!(tracker.context_count(), 2);
@@ -256,7 +254,9 @@ fn test_execution_context_tracking() {
 #[test]
 fn test_kernel_procedure_detection() {
     // Known kernel procedures.
-    assert!(is_kernel_procedure("miden::kernel::account_vault_add_asset"));
+    assert!(is_kernel_procedure(
+        "miden::kernel::account_vault_add_asset"
+    ));
     assert!(is_kernel_procedure("miden::kernel::get_account_id"));
     assert!(is_kernel_procedure("miden::note::get_inputs"));
     assert!(is_kernel_procedure("miden::tx::get_block_number"));
@@ -388,28 +388,44 @@ fn test_contract_trace_session_lifecycle() {
         .iter()
         .filter(|e| matches!(e, TraceEvent::ContextSwitch { .. }))
         .collect();
-    assert!(
-        !context_switches.is_empty(),
-        "should have context switches"
-    );
+    assert!(!context_switches.is_empty(), "should have context switches");
 
     // Verify we have kernel calls.
     let kernel_calls: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TraceEvent::Call { is_kernel: true, .. }))
+        .filter(|e| {
+            matches!(
+                e,
+                TraceEvent::Call {
+                    is_kernel: true,
+                    ..
+                }
+            )
+        })
         .collect();
     assert!(!kernel_calls.is_empty(), "should have kernel calls");
 
     // Verify we have user calls.
     let user_calls: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TraceEvent::Call { is_kernel: false, .. }))
+        .filter(|e| {
+            matches!(
+                e,
+                TraceEvent::Call {
+                    is_kernel: false,
+                    ..
+                }
+            )
+        })
         .collect();
     assert!(!user_calls.is_empty(), "should have user calls");
 
     // Verify context tracker.
     let tracker = session.context_tracker();
-    assert!(tracker.context_count() >= 2, "should have at least kernel + note contexts");
+    assert!(
+        tracker.context_count() >= 2,
+        "should have at least kernel + note contexts"
+    );
 
     // Step 4: Finalize.
     let summary_path = session.finalize().expect("finalize should succeed");
@@ -417,10 +433,7 @@ fn test_contract_trace_session_lifecycle() {
     assert!(summary_path.exists(), "summary file should exist");
 
     // Cannot finalize twice.
-    assert!(
-        session.finalize().is_err(),
-        "should not finalize twice"
-    );
+    assert!(session.finalize().is_err(), "should not finalize twice");
 }
 
 // ---------------------------------------------------------------------------
@@ -478,8 +491,7 @@ fn test_mockchain_trace_output() {
     let summary_path = session.finalize().unwrap();
 
     // Read and verify the summary.
-    let summary_content =
-        std::fs::read_to_string(&summary_path).expect("failed to read summary");
+    let summary_content = std::fs::read_to_string(&summary_path).expect("failed to read summary");
     let summary: serde_json::Value =
         serde_json::from_str(&summary_content).expect("summary should be valid JSON");
 
@@ -501,11 +513,7 @@ fn test_mockchain_trace_output() {
         2,
         "should have 2 accounts"
     );
-    assert_eq!(
-        summary["notes"].as_u64().unwrap(),
-        1,
-        "should have 1 note"
-    );
+    assert_eq!(summary["notes"].as_u64().unwrap(), 1, "should have 1 note");
 
     // Verify kernel calls are listed.
     let kernel_calls = summary["kernel_calls"].as_array().unwrap();
@@ -550,7 +558,15 @@ fn test_mockchain_trace_output() {
     // With tx_script set, should have a TxScript context switch.
     let tx_script_switches: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TraceEvent::ContextSwitch { kind: ContextKind::TxScript, .. }))
+        .filter(|e| {
+            matches!(
+                e,
+                TraceEvent::ContextSwitch {
+                    kind: ContextKind::TxScript,
+                    ..
+                }
+            )
+        })
         .collect();
     assert!(
         !tx_script_switches.is_empty(),
@@ -560,7 +576,10 @@ fn test_mockchain_trace_output() {
     // Verify the chain recorded the transaction.
     let chain = session.chain().unwrap();
     let consumed_note = chain.get_note(&note_id).unwrap();
-    assert!(consumed_note.consumed, "note should be consumed after transaction");
+    assert!(
+        consumed_note.consumed,
+        "note should be consumed after transaction"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -806,7 +825,10 @@ fn test_mockchain_builder_swap_notes() {
     let note = chain.get_note(&NoteId(10)).expect("swap note should exist");
     assert_eq!(note.sender, wallet_a);
     assert_eq!(note.assets.fungible.len(), 1);
-    assert_eq!(note.assets.fungible[0].amount, 100, "should use offered assets");
+    assert_eq!(
+        note.assets.fungible[0].amount, 100,
+        "should use offered assets"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -843,8 +865,16 @@ fn test_mockchain_multiple_transactions_same_block() {
         success: true,
     });
 
-    assert_eq!(chain.blocks.len(), 1, "both txns should be in one pending block");
-    assert_eq!(chain.blocks[0].transactions.len(), 2, "block should have 2 transactions");
+    assert_eq!(
+        chain.blocks.len(),
+        1,
+        "both txns should be in one pending block"
+    );
+    assert_eq!(
+        chain.blocks[0].transactions.len(),
+        2,
+        "block should have 2 transactions"
+    );
 
     chain.produce_block();
     assert_eq!(chain.block_number, 1);
