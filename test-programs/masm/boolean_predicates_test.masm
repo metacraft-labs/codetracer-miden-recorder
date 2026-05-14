@@ -1,0 +1,86 @@
+# boolean_predicates_test.masm
+#
+# Exercises every two-operand boolean / comparison predicate that
+# Miden 0.14 surfaces at the MASM source level so the recorder's
+# stack-snapshot path captures the 0/1 result of each one.  Miden
+# does not have a separate "bool" type — predicates leave a felt
+# 0 or 1 on top of the stack — so the strict pin asserts the
+# numeric 0/1 result on stack[0] at each predicate's source line.
+#
+# Layout (each procedure leaves a single 0/1 marker on the stack):
+#
+#   not_op    : not(0) = 1
+#   and_op    : (1, 1) and = 1
+#   or_op     : (0, 1) or  = 1
+#   xor_op    : (1, 1) xor = 0
+#   eq_op     : (5, 5) eq  = 1
+#   neq_op    : (5, 6) neq = 1
+#   lt_op     : (3, 5) lt  = 1   (felt-domain via u32lt -- requires
+#                                 explicit u32-tagged inputs in Miden)
+#   gt_op     : (5, 3) gt  = 1
+#   lte_op    : (3, 5) lte = 1
+#   gte_op    : (5, 3) gte = 1
+#
+# Miden 0.14's `lt` / `gt` / `lte` / `gte` mnemonics operate on
+# generic field elements; the u32-domain variants are
+# `u32lt`/`u32gt`/`u32lte`/`u32gte` which require u32-tagged
+# inputs (push.X already produces a felt that fits in 32 bits for
+# small values).  We use the bare felt-domain variants here so the
+# trace does not depend on a separate u32 assertion path.
+
+proc.not_op.0
+    push.0 not                # 1
+end
+
+proc.and_op.0
+    push.1 push.1 and         # 1
+end
+
+proc.or_op.0
+    push.0 push.1 or          # 1
+end
+
+proc.xor_op.0
+    push.1 push.1 xor         # 0
+end
+
+proc.eq_op.0
+    push.5 push.5 eq          # 1
+end
+
+proc.neq_op.0
+    push.5 push.6 neq         # 1
+end
+
+proc.lt_op.0
+    push.3 push.5 lt          # 1  (felt-domain less-than)
+end
+
+proc.gt_op.0
+    push.5 push.3 gt          # 1
+end
+
+proc.lte_op.0
+    push.3 push.5 lte         # 1
+end
+
+proc.gte_op.0
+    push.5 push.3 gte         # 1
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+    exec.not_op
+    exec.and_op
+    exec.or_op
+    exec.xor_op
+    exec.eq_op
+    exec.neq_op
+    exec.lt_op
+    exec.gt_op
+    exec.lte_op
+    exec.gte_op
+    # Drain the 11 markers (one per procedure + the leading push).
+    drop drop drop drop drop drop drop drop drop drop drop
+end

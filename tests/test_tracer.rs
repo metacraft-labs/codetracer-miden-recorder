@@ -2640,3 +2640,650 @@ fn test_assertion_error_codes_test_via_ct_print_full() {
         "io.text should start with the canonical Miden assertion-failure prefix; got `{text}`",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Helpers for the M10 round-2 strict tests below
+// ---------------------------------------------------------------------------
+
+/// Extract the top-4 stack snapshot (`stack[0..4]`) from a step event.
+/// Returns `None` if any of the slots is missing — every M10 strict
+/// step assertion that uses this helper expects all four slots to be
+/// populated, so missing slots indicate a recorder regression.
+fn step_top4(step: &serde_json::Value) -> Option<[i64; 4]> {
+    let vars = step["vars"].as_array()?;
+    let mut out = [0i64; 4];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let name = format!("stack[{i}]");
+        let v = vars.iter().find(|v| v["varname"] == name)?;
+        *slot = v["value"]["i"].as_i64()?;
+    }
+    Some(out)
+}
+
+/// Locate the unique step at (`function_qualified`, `line`) and return
+/// its top-4 stack snapshot, panicking with a clear message if zero or
+/// multiple matches are found.  Used by the M10 round-2 stack-snapshot
+/// tests where every pinned step is uniquely addressed by (function,
+/// line).
+fn unique_step_top4(doc: &serde_json::Value, function_qualified: &str, line: i64) -> [i64; 4] {
+    let events = doc["events"].as_array().expect("events array");
+    let matches: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| {
+            e["kind"] == "step"
+                && e["function"].as_str() == Some(function_qualified)
+                && e["line"].as_i64() == Some(line)
+        })
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one step at ({function_qualified}, line {line}); got {}",
+        matches.len(),
+    );
+    step_top4(matches[0]).expect("step must carry a full 4-felt stack snapshot")
+}
+
+/// Decode the `s0..s3` arg quartet from a `call_entry` event.  The
+/// recorder stages the first 4 stack felts as canonical call-args
+/// (named `s0`..`s3`) at every call boundary; tests use this to pin
+/// the exact felt-stack visible at the call site.
+fn call_entry_args_s0_s3(call_entry: &serde_json::Value) -> [i64; 4] {
+    let args = call_entry["args"].as_array().expect("args array");
+    let mut out = [0i64; 4];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let name = format!("s{i}");
+        let arg = args
+            .iter()
+            .find(|a| a["varname"] == name)
+            .unwrap_or_else(|| panic!("call_entry must stage `{name}`; got args={args:?}"));
+        *slot = arg["value"]["i"]
+            .as_i64()
+            .expect("call_entry arg must decode as Int.i");
+    }
+    out
+}
+
+/// Find the unique `call_entry` for `function_qualified`, panicking if
+/// not exactly one is present.  Used by the M10 round-2 boolean and
+/// u32 tests where every procedure is invoked exactly once so the
+/// per-call stack-state pin is unambiguous.
+fn unique_call_entry<'a>(
+    doc: &'a serde_json::Value,
+    function_qualified: &str,
+) -> &'a serde_json::Value {
+    let events = doc["events"].as_array().expect("events array");
+    let matches: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry" && e["function"].as_str() == Some(function_qualified))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one call_entry for {function_qualified}; got {}",
+        matches.len(),
+    );
+    matches[0]
+}
+
+// ---------------------------------------------------------------------------
+// u32_arithmetic_test.masm -- u32wrapping_*, u32overflowing_*, bitwise, shifts
+// ---------------------------------------------------------------------------
+
+/// Records `u32_arithmetic_test.masm` and pins:
+///   * Function table: `wrap_ops`, `overflow_ops`, `bitwise_ops`,
+///     `shift_ops`, `#main` (5 procedures).
+///   * Sibling call/exit ordering (each procedure is opened and
+///     closed before the next one is entered, so call_entry and
+///     call_exit match on every adjacent pair).
+///   * Every recorded value surfaces as `ValueRecord::Int` (no
+///     boolean / bigint / typed-u32 variant has landed).
+///   * Per-call stack-arg quartets at each procedure entry — the
+///     felt values present at the call boundary uniquely identify
+///     which prior procedure's result fed into the next one.
+///   * The u32 overflow flag (= 1 for `0xFFFFFFFE u32overflowing_add 3`)
+///     and the bitwise / shift results visible on the stack at the
+///     subsequent procedure's entry.
+#[test]
+fn test_u32_arithmetic_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_u32_arithmetic_test_via_ct_print_full",
+        "u32_arithmetic_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    // u32 results still surface as Int (no width-tagged variant has
+    // landed); the strict pin asserts the canonical Int decoding so a
+    // future recorder change to a width-tagged Int would break this
+    // test loudly rather than silently dropping the new metadata.
+    assert_all_values_are_int(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec![
+            "#exec::#main",
+            "#exec::bitwise_ops",
+            "#exec::overflow_ops",
+            "#exec::shift_ops",
+            "#exec::wrap_ops",
+        ],
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(13), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}",
+    );
+
+    // 13 step + 5 call_entry + 5 call_exit = 23.
+    let events = doc["events"].as_array().expect("events array");
+    assert_eq!(events.len(), 23, "events.len()");
+
+    // The four wrapper procedures are siblings under `#main`; the
+    // recorder's caller_invokes_both detection closes each one
+    // before opening the next, producing strict alternating
+    // entry/exit pairs.
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::wrap_ops".to_string(),
+            "#exec::overflow_ops".to_string(),
+            "#exec::bitwise_ops".to_string(),
+            "#exec::shift_ops".to_string(),
+        ],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "#exec::wrap_ops".to_string(),
+            "#exec::overflow_ops".to_string(),
+            "#exec::bitwise_ops".to_string(),
+            "#exec::shift_ops".to_string(),
+            "#exec::#main".to_string(),
+        ],
+    );
+
+    // ----- u32wrapping_* results visible at overflow_ops entry --------
+    // `wrap_ops` leaves three results on the stack from earliest to
+    // latest: 13 (wrap_add), 7 (wrap_sub), 30 (wrap_mul).  The
+    // recorder snapshots the stack at the call_entry of the next
+    // procedure (`overflow_ops`).  overflow_ops's first asmop is
+    // `push.0xFFFFFFFE` -- a direct push (the immediate is large
+    // enough that it does NOT compile to Pad+Incr) so the value
+    // 0xFFFFFFFE = 4294967294 IS visible at cycle_idx==1, with
+    // wrap_mul=30, wrap_sub=7, wrap_add=13 carried below.
+    let overflow_entry = unique_call_entry(&doc, "#exec::overflow_ops");
+    assert_eq!(
+        call_entry_args_s0_s3(overflow_entry),
+        [4294967294, 30, 7, 13],
+        "stack at overflow_ops entry: 0xFFFFFFFE just pushed, then \
+         wrap_mul=30, wrap_sub=7, wrap_add=13",
+    );
+
+    // ----- u32overflowing_add result visible at bitwise_ops entry ----
+    // `overflow_ops` does `push.0xFFFFFFFE push.3 u32overflowing_add`
+    // which leaves [overflow_flag=1, sum_lo=1, ...] on the stack
+    // -- 0xFFFFFFFE + 3 wraps to 1 with overflow=1.
+    // bitwise_ops's first asmop is `push.0xF0` (=240, direct push)
+    // so the args quartet is [240, flag=1, sum_lo=1, wrap_mul=30].
+    let bitwise_entry = unique_call_entry(&doc, "#exec::bitwise_ops");
+    assert_eq!(
+        call_entry_args_s0_s3(bitwise_entry),
+        [240, 1, 1, 30],
+        "stack at bitwise_ops entry: push.0xF0=240 just landed, then \
+         u32overflowing_add's [flag=1, sum_lo=1] and wrap_mul=30 below",
+    );
+
+    // ----- bitwise + shift results visible at #main's drain step -----
+    // After every wrapper procedure exits, control returns to #main
+    // for the trailing `drop drop ...` chain.  The first such step
+    // (line 61 in the fixture, the first `drop`) snapshots the
+    // stack as it stands AFTER the first drop has executed -- the
+    // top-4 felts are the most recent three (post-first-drop) plus
+    // a fourth slot.  Pinning the exact post-drop quartet captures
+    // the cumulative effect of every wrapper procedure.
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::#main", 61),
+        [64, 195, 243, 48],
+        "post-first-drop stack: u32shl=64, u32xor=195, u32or=243, u32and=48",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// boolean_predicates_test.masm -- not / and / or / xor / eq / neq /
+// lt / gt / lte / gte (every two-operand boolean predicate)
+// ---------------------------------------------------------------------------
+
+/// Records `boolean_predicates_test.masm` and pins:
+///   * Every declared predicate procedure plus `#main` is in the
+///     function table (11 entries).
+///   * Each predicate's result (0 or 1) reaches the next
+///     procedure's `call_entry` args quartet so the strict pin
+///     covers every operator.
+///   * Boolean predicates surface as `ValueRecord::Int { i: 0|1 }`
+///     -- the recorder has no `Bool` value variant for Miden
+///     felt-domain results yet.  The strict assertion on
+///     `assert_all_values_are_int` makes that contract explicit;
+///     a future Bool-tagged variant would break this test.
+#[test]
+fn test_boolean_predicates_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_boolean_predicates_test_via_ct_print_full",
+        "boolean_predicates_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    assert_all_values_are_int(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec![
+            "#exec::#main",
+            "#exec::and_op",
+            "#exec::eq_op",
+            "#exec::gt_op",
+            "#exec::gte_op",
+            "#exec::lt_op",
+            "#exec::lte_op",
+            "#exec::neq_op",
+            "#exec::not_op",
+            "#exec::or_op",
+            "#exec::xor_op",
+        ],
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(13), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(11), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 13 step + 11 call_entry + 11 call_exit = 35.
+    assert_eq!(events.len(), 35, "events.len()");
+
+    // Each predicate procedure runs in source order and the
+    // recorder closes each one before opening the next (sibling
+    // call detection via the static call graph).
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::not_op".to_string(),
+            "#exec::and_op".to_string(),
+            "#exec::or_op".to_string(),
+            "#exec::xor_op".to_string(),
+            "#exec::eq_op".to_string(),
+            "#exec::neq_op".to_string(),
+            "#exec::lt_op".to_string(),
+            "#exec::gt_op".to_string(),
+            "#exec::lte_op".to_string(),
+            "#exec::gte_op".to_string(),
+        ],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "#exec::not_op".to_string(),
+            "#exec::and_op".to_string(),
+            "#exec::or_op".to_string(),
+            "#exec::xor_op".to_string(),
+            "#exec::eq_op".to_string(),
+            "#exec::neq_op".to_string(),
+            "#exec::lt_op".to_string(),
+            "#exec::gt_op".to_string(),
+            "#exec::lte_op".to_string(),
+            "#exec::gte_op".to_string(),
+            "#exec::#main".to_string(),
+        ],
+    );
+
+    // ----- Per-predicate result pinning via call_entry args ----------
+    // Each procedure's call_entry args quartet captures the stack
+    // AT the moment the procedure is entered -- so the result of
+    // procedure N is visible somewhere in procedure (N+1)'s args.
+    // Pinning the full s0..s3 quartet at each entry captures both
+    // the most recent result and the carry-through of older
+    // results, providing strict per-predicate coverage.
+    let pin = |name: &str, want: [i64; 4]| {
+        let entry = unique_call_entry(&doc, name);
+        assert_eq!(
+            call_entry_args_s0_s3(entry),
+            want,
+            "stack-arg quartet at {name} entry",
+        );
+    };
+    // The recorder captures call_entry args from the operand stack
+    // AT cycle_idx == 1 of the new procedure's first asmop.  In
+    // Miden 0.14 the assembler maps `push.0` and `push.1` to the
+    // single-cycle `Pad` opcode (push 0) followed by an additional
+    // increment for `push.1`; the cycle_idx == 1 observation
+    // therefore catches the `Pad` step which leaves 0 on top
+    // (regardless of whether the source said `push.0` or `push.1`).
+    // Larger immediates (`push.3`, `push.5`) compile to a direct
+    // push and the immediate value is visible at cycle_idx == 1.
+    //
+    // Initial begin-block: `push.0` from #main is BELOW the
+    // `not_op` body's first push.  Args quartet is all zeros.
+    pin("#exec::not_op", [0, 0, 0, 0]);
+    // not(0) = 1 left on top by not_op.  and_op's first asmop is
+    // `push.1` which compiles to Pad+Incr; cycle_idx==1 catches
+    // the Pad (top=0) with the not_op result (1) in slot 1.
+    pin("#exec::and_op", [0, 1, 0, 0]);
+    // and_op leaves 1 on top.  or_op starts with `push.0` (Pad)
+    // -- top=0 with [and=1, not=1, 0_main] below.
+    pin("#exec::or_op", [0, 1, 1, 0]);
+    // or_op leaves 1 on top.  xor_op starts with `push.1`
+    // (Pad+Incr); cycle_idx==1 sees the Pad: [0, or=1, and=1, not=1].
+    pin("#exec::xor_op", [0, 1, 1, 1]);
+    // xor_op leaves 0 on top (1 XOR 1 = 0).  eq_op starts with
+    // `push.5` which compiles to a direct push so the 5 IS
+    // visible at cycle_idx==1: [5, xor=0, or=1, and=1].
+    pin("#exec::eq_op", [5, 0, 1, 1]);
+    // eq_op leaves 1 on top (5 == 5).  neq_op starts with
+    // `push.5`: [5, eq=1, xor=0, or=1].
+    pin("#exec::neq_op", [5, 1, 0, 1]);
+    // neq_op leaves 1 on top (5 != 6).  lt_op starts with
+    // `push.3`: [3, neq=1, eq=1, xor=0].
+    pin("#exec::lt_op", [3, 1, 1, 0]);
+    // lt_op leaves 1 on top (3 < 5).  gt_op starts with `push.5`:
+    // [5, lt=1, neq=1, eq=1].
+    pin("#exec::gt_op", [5, 1, 1, 1]);
+    // gt_op leaves 1 on top (5 > 3).  lte_op starts with `push.3`:
+    // [3, gt=1, lt=1, neq=1].
+    pin("#exec::lte_op", [3, 1, 1, 1]);
+    // lte_op leaves 1 on top (3 <= 5).  gte_op starts with `push.5`:
+    // [5, lte=1, gt=1, lt=1].
+    pin("#exec::gte_op", [5, 1, 1, 1]);
+}
+
+// ---------------------------------------------------------------------------
+// stack_manipulation_test.masm -- dup.N / swap.N / movup.N / movdn.N /
+// padw / dropw (the indexed stack-shuffle family)
+// ---------------------------------------------------------------------------
+
+/// Records `stack_manipulation_test.masm` and pins the recorder's
+/// top-4 stack snapshot at every step inside the `shuffle`
+/// procedure.  The fixture exercises the full indexed-shuffle
+/// family in source order; pinning the entire stack-shape sequence
+/// catches any per-op recorder regression (mis-decoded `dup.N`
+/// offset, swapped operands in `movup.3`, dropped `padw`/`dropw`
+/// pair, etc.) that would otherwise hide behind a top-of-stack-only
+/// assertion.
+#[test]
+fn test_stack_manipulation_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_stack_manipulation_test_via_ct_print_full",
+        "stack_manipulation_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    assert_all_values_are_int(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::shuffle"]);
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(13), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 13 step + 2 call_entry + 2 call_exit = 17.
+    assert_eq!(events.len(), 17, "events.len()");
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["#exec::#main".to_string(), "#exec::shuffle".to_string()],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec!["#exec::shuffle".to_string(), "#exec::#main".to_string()],
+    );
+
+    // ----- Strict per-line stack-shape pinning -----------------------
+    // The fixture body is laid out so each shuffle op lives on its
+    // own line (with a trailing balancing op so the stack returns
+    // to the same shape between groups).  We pin the top-4 stack
+    // snapshot at every step inside `shuffle` — any per-op
+    // recorder regression would change at least one of these.
+    //
+    // Entry line 18 (the first push.1 in `push.1 push.2 push.3 push.4`)
+    // snapshot fires BEFORE any of the four pushes have landed on the
+    // stack so the top is still all zeros.
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::shuffle", 18),
+        [0, 0, 0, 0],
+        "shuffle entry: stack still empty (only the leading push.0 from #main)",
+    );
+    // Line 23 = `dup.3` -- copies stack[3]=1 to top.
+    // Stack before: [4, 3, 2, 1, 0_from_main].
+    // Stack after : [1, 4, 3, 2, 1, 0_from_main].
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::shuffle", 23),
+        [1, 4, 3, 2],
+        "after dup.3: stack[3]=1 copied to top",
+    );
+    // Line 24 = `drop` -- pop the duplicated 1.
+    // Stack after: [4, 3, 2, 1].
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::shuffle", 24),
+        [4, 3, 2, 1],
+        "after drop: original [4, 3, 2, 1] restored",
+    );
+    // Line 29 = first `swap.2`.  In Miden 0.14 `swap.2` compiles to
+    // the two-op sequence [Swap, MovUp2]; the recorder snapshots
+    // at cycle_idx==1 which is AFTER the first Swap (i.e. mid-asmop)
+    // but BEFORE the MovUp2.  So [4, 3, 2, 1] becomes [3, 4, 2, 1]
+    // (only Swap has fired); the MovUp2's effect is reflected in
+    // the SECOND swap.2's snapshot below.
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::shuffle", 29),
+        [3, 4, 2, 1],
+        "after first swap.2's first cycle: only the inner Swap has \
+         fired; MovUp2 lands at cycle_idx==2 which the recorder \
+         currently does not snapshot",
+    );
+    // Line 30 = second `swap.2`.  The carry-through is: first
+    // swap.2's MovUp2 has now run, taking [3, 4, 2, 1] to
+    // [2, 3, 4, 1]; second swap.2's first cycle (Swap) then
+    // swaps stack[0]<->stack[1] giving [3, 2, 4, 1].
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::shuffle", 30),
+        [3, 2, 4, 1],
+        "after second swap.2's first cycle: previous swap.2's MovUp2 \
+         landed first, then this Swap fires",
+    );
+    // Line 35 = `movup.3` -- bring stack[3]=1 to top.
+    // Stack before: [4, 3, 2, 1].
+    // Stack after : [1, 4, 3, 2].
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::shuffle", 35),
+        [1, 4, 3, 2],
+        "after movup.3: stack[3] becomes top",
+    );
+    // Line 36 = `movdn.3` -- send top back down to position 3.
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::shuffle", 36),
+        [4, 3, 2, 1],
+        "after movdn.3: original restored",
+    );
+    // Line 41 = `padw` -- push 4 zeros.
+    // Stack before: [4, 3, 2, 1].
+    // Snapshot at first cycle of padw shows the FIRST zero just
+    // landed on top, with [4, 3, 2] still visible below.
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::shuffle", 41),
+        [0, 4, 3, 2],
+        "after first cycle of padw: one zero visible on top",
+    );
+    // Line 46 = `dropw` -- drop the top 4 felts.
+    // Snapshot at first cycle of dropw shows three zeros still
+    // visible on top with the first 4 from the original [4, 3, 2, 1]
+    // beginning to roll up.
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::shuffle", 46),
+        [0, 0, 0, 4],
+        "after first cycle of dropw: three padw zeros plus the 4 below",
+    );
+    // Line 50 = the trailing `drop drop drop drop` (line 50 sits
+    // inside the `shuffle` body but the recorder attributes the
+    // step to `#main` because the assembler folds the trailing
+    // drops back into the caller's context once `shuffle` itself
+    // has unwound).  Snapshot pins the final cleared shape.
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::#main", 50),
+        [3, 2, 1, 0],
+        "after the last in-shuffle drop: post-shuffle [3, 2, 1, 0_from_main]",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// large_field_literal_test.masm -- full-width 64-bit field literals
+// ---------------------------------------------------------------------------
+
+/// Records `large_field_literal_test.masm` and pins:
+///   * The largest-representable element `0xFFFFFFFE00000000`
+///     round-trips through the recorder's `as_int() as i64`
+///     path losslessly: it surfaces as `i = -8589934592`
+///     (the two's-complement signed-i64 reading of the same
+///     bit pattern, cast back via `(-8589934592_i64) as u64
+///     == 0xFFFFFFFE00000000`).
+///   * The small hex literal `0x100` round-trips as `i = 256`.
+///   * The decimal literal `1234` round-trips as `i = 1234`.
+///   * Every value still decodes as `ValueRecord::Int` -- a
+///     future BigInt or string-tagged variant for out-of-i64
+///     felts would break this test loudly rather than silently
+///     dropping the new metadata.
+#[test]
+fn test_large_field_literal_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_large_field_literal_test_via_ct_print_full",
+        "large_field_literal_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    assert_all_values_are_int(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::lits"]);
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(6), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 6 step + 2 call_entry + 2 call_exit = 10.
+    assert_eq!(events.len(), 10, "events.len()");
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["#exec::#main".to_string(), "#exec::lits".to_string()],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec!["#exec::lits".to_string(), "#exec::#main".to_string()],
+    );
+
+    // ----- Step-by-step strict pin of every literal --------------------
+    // Line 22 = `push.0xFFFFFFFE00000000` snapshot (after this push
+    // lands the largest element on top of the stack).  The
+    // bit-pattern reading via `as_int() as i64` produces -8589934592
+    // (= 0xFFFFFFFE00000000 reinterpreted as signed-i64 two's
+    // complement).
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::lits", 22),
+        [-8589934592, 0, 0, 0],
+        "push.0xFFFFFFFE00000000 must round-trip via signed-i64 cast",
+    );
+    // Verify the sign-bit round-trip explicitly: cast back to u64
+    // must reproduce the original 0xFFFFFFFE00000000.
+    assert_eq!(
+        (-8589934592_i64) as u64,
+        0xFFFFFFFE00000000_u64,
+        "i64 -8589934592 must round-trip to the original bit pattern",
+    );
+    // Line 23 = `push.0x0100` snapshot -- 0x100 = 256.
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::lits", 23),
+        [256, -8589934592, 0, 0],
+        "push.0x0100 leaves 256 on top, with the prior literal below",
+    );
+    // Line 24 = `push.1234` snapshot.
+    assert_eq!(
+        unique_step_top4(&doc, "#exec::#main", 24),
+        [1234, 256, -8589934592, 0],
+        "push.1234 leaves 1234 on top, with the prior two literals below",
+    );
+
+    // ----- Type table is the canonical 3-entry shape -------------------
+    // `felt`, `Word` and the `type_0` placeholder used by the
+    // step-snapshot path.  No new TypeKind variant has landed for
+    // large-felt encoding; pinning the type table makes that
+    // explicit so a future addition surfaces here.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt", "Word", "type_0"]);
+}

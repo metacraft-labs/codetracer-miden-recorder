@@ -1,0 +1,33 @@
+# large_field_literal_test.masm
+#
+# Exercises full-width 64-bit field-element literals expressed in
+# hexadecimal form (`push.0x...`).  Miden's field is the prime field
+# of order p = 2^64 - 2^32 + 1, so the largest representable element
+# is `2^64 - 2^32 = 0xFFFFFFFE00000000`.  The recorder must preserve
+# the full 64-bit precision when surfacing such a literal as a stack
+# value -- a `i64` cast of that bit pattern is negative, so the
+# recorder's `as_int() as i64` path round-trips it through the
+# signed-integer ValueRecord without any string truncation.
+#
+# We push three literals so the test can pin all three on stack[0],
+# stack[1] and stack[2] within a single step:
+#
+#   * push.0xFFFFFFFE00000000 -- the largest representable element
+#                                (also the modulus minus 2^32; sits at
+#                                the top of the prime field).
+#   * push.0x100              -- a small hex literal (256).
+#   * push.1234               -- a small decimal literal.
+
+proc.lits.0
+    push.0xFFFFFFFE00000000
+    push.0x0100
+    push.1234
+end
+
+begin
+    # Leading push so #main is the first observed asmop context
+    # and the recorder synthesises a register_call for it.
+    push.0
+    exec.lits
+    drop drop drop drop
+end
