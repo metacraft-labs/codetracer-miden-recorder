@@ -1,0 +1,75 @@
+# stdlib_imports_test.masm
+#
+# Exercises the assembler's MASM-stdlib loading path through three
+# imported procedures:
+#
+#   * `std::math::u64::wrapping_add` -- u64 addition, two-felt-wide
+#     operands `[b_hi, b_lo, a_hi, a_lo] -> [c_hi, c_lo]`.
+#   * `std::math::u64::wrapping_mul` -- u64 multiplication, same
+#     two-felt-wide calling convention.
+#   * `std::sys::truncate_stack` -- normalises stack depth to 16
+#     elements while preserving the top 16 felts.
+#
+# The two-felt u64 representation packs (hi, lo) as two 32-bit
+# limbs so a single u64 occupies two consecutive felts on the
+# stack.  Stack ordering for the binary u64 ops follows Miden's
+# convention `[b_hi, b_lo, a_hi, a_lo, ...] -> [c_hi, c_lo, ...]`,
+# i.e. the top of the stack is the most-significant limb of the
+# right-hand operand (b).
+#
+# Strict-pin assertions in the matching test cover:
+#
+#   * Imported stdlib procedures surface in the function table
+#     under fully-qualified module-prefixed names
+#     (`std::math::u64::wrapping_add` rather than bare
+#     `wrapping_add`) -- the recorder follows assembler-inlined
+#     stdlib procedures without dropping `call_entry` events.
+#   * `std::sys::truncate_stack` registers analogously and is
+#     invoked exactly once at end of `#main`.
+#   * The two-felt result of each u64 op is observed at a known
+#     line / call boundary, pinning the `(c_hi, c_lo)` pair.
+#
+# Operand layout:
+#
+#   add: a = 0x0000_0001_0000_0005, b = 0x0000_0002_0000_0003
+#        a + b = 0x0000_0003_0000_0008, so [c_hi=3, c_lo=8].
+#
+#   mul: a = 0x0000_0001_0000_0000 (= 2^32),
+#        b = 0x0000_0000_0000_0002 (= 2),
+#        a * b = 0x0000_0002_0000_0000, so [c_hi=2, c_lo=0].
+#
+# After the trailing `truncate_stack`, the top of the stack
+# contains the four trailing result felts (mul_hi, mul_lo, add_hi,
+# add_lo) followed by zero padding.
+
+use.std::math::u64
+use.std::sys
+
+proc.add_op.0
+    # Push two u64 operands with the convention
+    # [b_hi, b_lo, a_hi, a_lo, ...] -> [c_hi, c_lo, ...].
+    # a = 0x0000_0001_0000_0005 (hi=1, lo=5)
+    # b = 0x0000_0002_0000_0003 (hi=2, lo=3)
+    push.5 push.1                         # stack top -> [a_hi=1, a_lo=5, ...]
+    push.3 push.2                         # stack top -> [b_hi=2, b_lo=3, a_hi=1, a_lo=5, ...]
+    exec.u64::wrapping_add                # -> [c_hi=3, c_lo=8, ...]
+end
+
+proc.mul_op.0
+    # a = 0x0000_0001_0000_0000 (hi=1, lo=0) = 2^32
+    # b = 0x0000_0000_0000_0002 (hi=0, lo=2) = 2
+    push.0 push.1                         # stack top -> [a_hi=1, a_lo=0, ...]
+    push.2 push.0                         # stack top -> [b_hi=0, b_lo=2, a_hi=1, a_lo=0, ...]
+    exec.u64::wrapping_mul                # -> [c_hi=2, c_lo=0, ...]
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+    exec.add_op
+    exec.mul_op
+    # Normalise the stack via the imported `std::sys::truncate_stack`
+    # so the trace finalises through a stdlib procedure rather than
+    # a manual `drop` chain.
+    exec.sys::truncate_stack
+end

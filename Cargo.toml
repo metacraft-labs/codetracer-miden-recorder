@@ -15,6 +15,13 @@ codetracer_trace_writer_nim = { path = "../codetracer-trace-format/codetracer_tr
 miden-processor = "0.14"
 miden-assembly = "0.14"
 miden-core = "0.14"
+# MASM standard library (provides `std::math::u64`, `std::sys`, etc.)
+# so MASM sources can `use.std::*` and the assembler resolves stdlib
+# procedures.  The recorder loads `StdLibrary::default()` into the
+# assembler at trace time -- without this the assembler would error
+# out on every `use.std::*` directive (see
+# `stdlib_imports_test.masm`).
+miden-stdlib = { version = "0.14", features = ["with-debug-info"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
