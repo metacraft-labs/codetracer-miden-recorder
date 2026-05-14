@@ -406,12 +406,14 @@ fn test_recorded_trace_via_ct_print_json() {
     }
 
     // ----- Strict ValueRecord::Int invariant on every decoded value ---
-    // The Miden recorder always encodes felts as `ValueRecord::Int`
-    // (see `tracer.rs`).  If a future change starts emitting a
-    // different variant — e.g. BigInt for felts that exceed the
-    // signed-i64 range, or a typed `Felt` primitive — this assertion
-    // fires loudly so the test author can decide whether to extend
-    // the assertions or accept the new variant.
+    // The Miden recorder encodes felts as `ValueRecord::Int` and
+    // 4-felt Words (loaded via `mem_loadw` / `loc_loadw`) as
+    // `ValueRecord::Sequence` of 4 Int felts -- see `tracer.rs`.
+    // If a future change starts emitting a different variant — e.g.
+    // BigInt for felts that exceed the signed-i64 range, or a typed
+    // `Felt` primitive — this assertion fires loudly so the test
+    // author can decide whether to extend the assertions or accept
+    // the new variant.
     let mut value_count = 0usize;
     let mut check_int = |label: &str, value: &serde_json::Value| {
         assert_eq!(
@@ -428,16 +430,39 @@ fn test_recorded_trace_via_ct_print_json() {
         );
         value_count += 1;
     };
+    let mut check_value = |label: &str, varname: &str, value: &serde_json::Value| {
+        if varname == "word" {
+            // Word: 4-felt Sequence of Int.  Validate the shape
+            // and recurse into the elements via check_int.
+            assert_eq!(
+                value["kind"].as_str(),
+                Some("Sequence"),
+                "{label} `word` should decode as Sequence; got {value}",
+            );
+            let elements = value["elements"].as_array().expect("Word.elements array");
+            assert_eq!(
+                elements.len(),
+                4,
+                "{label} `word` Sequence must have 4 elements; got {}",
+                elements.len(),
+            );
+            for (idx, element) in elements.iter().enumerate() {
+                check_int(&format!("{label} word[{idx}]"), element);
+            }
+        } else {
+            check_int(label, value);
+        }
+    };
     for e in events {
         if e["kind"] == "call_entry" {
             for arg in e["args"].as_array().into_iter().flatten() {
                 let name = arg["varname"].as_str().unwrap_or("?");
-                check_int(&format!("call_entry arg `{name}`"), &arg["value"]);
+                check_value(&format!("call_entry arg `{name}`"), name, &arg["value"]);
             }
         } else if e["kind"] == "step" {
             for v in e["vars"].as_array().into_iter().flatten() {
                 let name = v["varname"].as_str().unwrap_or("?");
-                check_int(&format!("step var `{name}`"), &v["value"]);
+                check_value(&format!("step var `{name}`"), name, &v["value"]);
             }
         }
     }

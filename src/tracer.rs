@@ -27,6 +27,9 @@ pub struct MidenTracer {
     writer: Box<dyn TraceWriter + Send>,
     /// Miden "felt" type id (registered once).
     felt_type_id: Option<codetracer_trace_types::TypeId>,
+    /// Miden "Word" type id -- a 4-felt compound value emitted as
+    /// `ValueRecord::Sequence` after every `mem_loadw` / `loc_loadw`.
+    word_type_id: Option<codetracer_trace_types::TypeId>,
 }
 
 impl MidenTracer {
@@ -102,6 +105,7 @@ impl MidenTracer {
         let mut tracer = MidenTracer {
             writer,
             felt_type_id: None,
+            word_type_id: None,
         };
 
         // -- 5. Initialise output streams via callback --------------------------------
@@ -113,6 +117,14 @@ impl MidenTracer {
         // Register the "felt" type (after start, so that "None" gets TypeId(0)).
         let felt_type_id = TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Int, "felt");
         tracer.felt_type_id = Some(felt_type_id);
+
+        // Register the "Word" type -- the canonical 4-felt Miden
+        // compound value surfaced after every `mem_loadw` /
+        // `loc_loadw`.  Registering eagerly (alongside `felt`)
+        // keeps the type table compact and the type id stable
+        // across all recorded programs.
+        let word_type_id = TraceWriter::ensure_type_id(&mut *tracer.writer, TypeKind::Seq, "Word");
+        tracer.word_type_id = Some(word_type_id);
 
         // -- 7. Walk VM states --------------------------------------------------------
         tracer.process_vm_states(vm_state_iter, &source_map, source_path)?;
@@ -135,6 +147,7 @@ impl MidenTracer {
         source_path: &Path,
     ) -> Result<()> {
         let felt_type_id = self.felt_type_id.unwrap();
+        let word_type_id = self.word_type_id.unwrap();
 
         // Parse num_locals for each procedure from the MASM source.
         let proc_locals = parse_proc_locals(source_map.source_code());
@@ -218,6 +231,17 @@ impl MidenTracer {
         // navigable in the calltrace pane.
         let mut vm_error: Option<String> = None;
 
+        // Pending Word value harvested at the LAST cycle of a
+        // multi-cycle Word-load asmop (`loc_loadw`, which is 3
+        // cycles, sometimes 4).  The recorder normally only
+        // processes cycle_idx == 1 of each asmop, but the
+        // post-load state for `loc_loadw` only materialises at
+        // cycle_idx == num_cycles, so we capture the word here
+        // and emit it as a `register_variable_with_full_value`
+        // on the next cycle_idx == 1 boundary (which is the next
+        // asmop's BEFORE-state -- i.e. the post-loadw state).
+        let mut pending_word: Option<Vec<i64>> = None;
+
         for result in vm_state_iter {
             let state: VmState = match result {
                 Ok(s) => s,
@@ -234,6 +258,19 @@ impl MidenTracer {
                 Some(a) => a,
                 None => continue,
             };
+
+            // Capture the post-load Word from the LAST cycle of a
+            // multi-cycle word-load (loc_loadw); for single-cycle
+            // mem_loadw this also fires (cycle_idx == 1 == num_cycles)
+            // so the pending_word path covers both kinds of word
+            // load.  We harvest unconditionally here -- the emission
+            // happens on the next cycle_idx == 1 boundary below.
+            if asmop.cycle_idx() == asmop.num_cycles()
+                && is_word_load(asmop.op())
+                && state.stack.len() >= 4
+            {
+                pending_word = Some((0..4).map(|i| state.stack[i].as_int() as i64).collect());
+            }
 
             // Only process the first cycle of each assembly instruction to avoid duplicates.
             if asmop.cycle_idx() != 1 {
@@ -543,6 +580,62 @@ impl MidenTracer {
                 TraceWriter::register_variable_with_full_value(&mut *self.writer, &name, value);
             }
 
+            // -- Emit Word value at a mem_loadw / loc_loadw -------------------------------
+            // The recorder normally observes VM state at
+            // cycle_idx == 1 of each asmop.  For a single-cycle
+            // word load (`mem_loadw`, 1 cycle) cycle_idx == 1 IS
+            // num_cycles, so the post-load state is visible
+            // directly via `state.stack`.  For a multi-cycle
+            // word load (`loc_loadw`, 3 cycles) we captured the
+            // post-load word above when iterating through the
+            // ordinarily-skipped cycles; emit it here at the
+            // current asmop boundary (which is the SAME asmop
+            // that issued the load -- pending_word and op_str
+            // align on the same step boundary).
+            //
+            // Either path yields a `ValueRecord::Sequence` typed
+            // against the eagerly-registered `Word` type so the
+            // canonical Miden compound value is preserved (precondition
+            // for hash digest typing and Word-aware GUI rendering).
+            // See `memory_word_ops_test.masm` and
+            // `local_word_ops_test.masm`.
+            // Drain the pending word first (set by a multi-cycle
+            // word load whose post-load state landed on a
+            // cycle_idx > 1 above).  If no pending word is set
+            // and the CURRENT asmop is a single-cycle word load
+            // (`mem_loadw` is 1 cycle, so cycle_idx==1 IS the
+            // post-load state), use the live `state.stack`.  We
+            // do NOT fall back to the live stack for multi-cycle
+            // word loads because at cycle_idx==1 the load has not
+            // yet completed; the pending_word path will surface
+            // the correct value on the next asmop's boundary.
+            let word_to_emit: Option<Vec<i64>> = if let Some(w) = pending_word.take() {
+                Some(w)
+            } else if is_word_load(op_str) && asmop.num_cycles() == 1 && state.stack.len() >= 4 {
+                Some((0..4).map(|i| state.stack[i].as_int() as i64).collect())
+            } else {
+                None
+            };
+            if let Some(elements) = word_to_emit {
+                let elements: Vec<ValueRecord> = elements
+                    .into_iter()
+                    .map(|i| ValueRecord::Int {
+                        i,
+                        type_id: felt_type_id,
+                    })
+                    .collect();
+                let word_value = ValueRecord::Sequence {
+                    elements,
+                    is_slice: false,
+                    type_id: word_type_id,
+                };
+                TraceWriter::register_variable_with_full_value(
+                    &mut *self.writer,
+                    "word",
+                    word_value,
+                );
+            }
+
             // -- Emit local memory slot values -------------------------------------------
             // In Miden, local slot N is at address: fmp - (num_locals - N).
             // We look up each active slot's address in state.memory.
@@ -622,6 +715,102 @@ impl MidenTracer {
 fn parse_loc_store(op: &str) -> Option<u32> {
     op.strip_prefix("loc_store.")
         .and_then(|s| s.parse::<u32>().ok())
+}
+
+/// Returns true if the op string is a Word-level memory load
+/// (`mem_loadw`, `mem_loadw.<addr>`, `loc_loadw.<slot>`) -- the
+/// instruction that surfaces a 4-felt Word as the top of the
+/// operand stack.  After such an op, the top four stack felts are
+/// the canonical Miden Word value and the recorder surfaces them
+/// as a `ValueRecord::Sequence` (the Miden compound value
+/// analogous to a Cairo felt-word, a Move struct, or an EVM
+/// 256-bit word).
+fn is_word_load(op: &str) -> bool {
+    op == "mem_loadw"
+        || op.starts_with("mem_loadw.")
+        || op == "loc_loadw"
+        || op.starts_with("loc_loadw.")
+}
+
+/// Distinguishes the three Miden procedure-invocation forms:
+///
+/// * `Exec`    — `exec.X`     (inline expansion, same memory context)
+/// * `Call`    — `call.X`     (cross-context call, fresh memory context)
+/// * `SysCall` — `syscall.X`  (kernel-procedure call)
+///
+/// The recorder uses this kind tag to label call_entry events so
+/// the calltrace pane can distinguish a logical inline call from
+/// a true cross-context boundary -- matching the Cairo
+/// `ContractCall`/`LibraryCall` distinction and the EVM
+/// `CALL`/`STATICCALL`/`DELEGATECALL` distinction surfaced by
+/// peer recorders.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum CallKind {
+    Exec,
+    Call,
+    SysCall,
+}
+
+impl CallKind {
+    pub fn as_tag(&self) -> &'static str {
+        match self {
+            CallKind::Exec => "Exec",
+            CallKind::Call => "Call",
+            CallKind::SysCall => "SysCall",
+        }
+    }
+}
+
+/// Static parse of (caller -> callee -> CallKind) from MASM source.
+/// Public for direct testing of the kind-detection logic
+/// independently of the recorder's runtime path -- the runtime
+/// trace still emits a single call_entry per call boundary; the
+/// kind tag is exposed via `parse_call_kinds` so external tools
+/// (and the per-fixture strict tests) can join the static kind
+/// metadata onto the runtime call sequence.
+pub fn parse_call_kinds(source: &str) -> HashMap<String, HashMap<String, CallKind>> {
+    let mut graph: HashMap<String, HashMap<String, CallKind>> = HashMap::new();
+    let mut current: Option<String> = None;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        let code = match trimmed.find('#') {
+            Some(idx) => &trimmed[..idx],
+            None => trimmed,
+        };
+        let code = code.trim();
+        if code.is_empty() {
+            continue;
+        }
+        if code.starts_with("proc.") || code.starts_with("export.") {
+            if let Some(name) = code.split('.').nth(1) {
+                current = Some(name.to_string());
+                graph.entry(name.to_string()).or_default();
+            }
+        } else if code == "begin" {
+            current = Some("#main".to_string());
+            graph.entry("#main".to_string()).or_default();
+        } else if code == "end" {
+            current = None;
+        } else if let Some(parent) = current.as_ref() {
+            for tok in code.split_whitespace() {
+                let kinded = if let Some(c) = tok.strip_prefix("syscall.") {
+                    Some((CallKind::SysCall, c))
+                } else if let Some(c) = tok.strip_prefix("call.") {
+                    Some((CallKind::Call, c))
+                } else {
+                    tok.strip_prefix("exec.").map(|c| (CallKind::Exec, c))
+                };
+                if let Some((kind, callee)) = kinded {
+                    let bare = callee.rsplit("::").next().unwrap_or(callee);
+                    graph
+                        .get_mut(parent)
+                        .unwrap()
+                        .insert(bare.to_string(), kind);
+                }
+            }
+        }
+    }
+    graph
 }
 
 /// Parse procedure declarations from MASM source to extract num_locals.

@@ -1983,3 +1983,660 @@ fn test_stack_manip_shuffle_registered() {
         "expected `#exec::shuffle` in functions; got {functions:?}"
     );
 }
+
+// ===========================================================================
+// M10 fixtures: per-program ct-print --full strict assertions
+// ===========================================================================
+//
+// Each test below mirrors the policy used by the existing
+// `test_<program>_via_ct_print_full` family above: record one
+// purpose-built MASM program, decode through ct-print, and pin
+// EXACT counts / EXACT call sequence / EXACT decoded values.
+
+// ---------------------------------------------------------------------------
+// mast_inlining_test.masm -- 5-deep `exec.X` chain (closes M9 deferred
+// `test_nested_calls_full_chain_registered` in the larger setting)
+// ---------------------------------------------------------------------------
+
+/// Records `mast_inlining_test.masm` and pins the recorder's
+/// observed shape: 6 functions registered (5 user procs + #main),
+/// 5 call_entry events for `leaf -> one -> two -> three ->
+/// wrapper`, and the leaf-most propagation `1+2+3=6`,
+/// `6+10=16`, `16+100=116`, `116+1000=1116`, `1116+11=1127`.
+///
+/// This is the close-out test for the static-decl pre-pass added
+/// in 8edaccd: the assembler inlines every wrapper into the leaf,
+/// so at runtime only `leaf` surfaces as a fresh `context_name`.
+/// Without the pre-pass `one`, `two`, `three`, `wrapper` would all
+/// be missing from both the function table and the call_entry
+/// stream (as captured by the M9 deferred test for the original
+/// 4-deep `nested_calls_test.masm`).
+#[test]
+fn test_mast_inlining_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_mast_inlining_test_via_ct_print_full",
+        "mast_inlining_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec![
+            "#exec::#main",
+            "#exec::leaf",
+            "#exec::one",
+            "#exec::three",
+            "#exec::two",
+            "#exec::wrapper",
+        ],
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(7), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 7 step + 5 call_entry + 5 call_exit = 17.
+    assert_eq!(events.len(), 17, "events.len()");
+
+    // Both call_entry and call_exit appear in callKey order
+    // (innermost first) -- the chain-synthesis pre-pass registers
+    // all five frames before the first step is emitted, so they
+    // attach to step 0 and ct-print iterates them by callKey.
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::leaf".to_string(),
+            "#exec::one".to_string(),
+            "#exec::two".to_string(),
+            "#exec::three".to_string(),
+            "#exec::wrapper".to_string(),
+        ],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "#exec::leaf".to_string(),
+            "#exec::one".to_string(),
+            "#exec::two".to_string(),
+            "#exec::three".to_string(),
+            "#exec::wrapper".to_string(),
+        ],
+    );
+
+    // ----- Per-procedure leaf-result propagation ----------------------
+    // The leaf computes 1+2+3 = 6 and surfaces that on stack[0]
+    // at line 22.  Each wrapper then pushes its own constant
+    // (10, 100, 1000, 11) and adds to the carried value.  We
+    // walk every step's vars array to harvest stack[0] samples
+    // and pin the cumulative result at each procedure's body
+    // line.
+    let last_stack0 = |line_num: i64| -> Option<i64> {
+        events
+            .iter()
+            .filter(|e| e["kind"] == "step" && e["line"].as_i64() == Some(line_num))
+            .flat_map(|e| e["vars"].as_array().cloned().unwrap_or_default())
+            .filter(|v| v["varname"] == "stack[0]")
+            .filter_map(|v| v["value"]["i"].as_i64())
+            .next_back()
+    };
+    // After leaf body completes (line 22): 1 + 2 + 3 = 6.
+    assert_eq!(last_stack0(22), Some(6), "leaf computes 1+2+3=6");
+    // After one body completes (line 27): 6 + 10 = 16.
+    assert_eq!(last_stack0(27), Some(16), "one returns leaf()+10 = 16");
+    // After two body completes (line 32): 16 + 100 = 116.
+    assert_eq!(last_stack0(32), Some(116), "two returns one()+100 = 116");
+    // After three body completes (line 37): 116 + 1000 = 1116.
+    assert_eq!(
+        last_stack0(37),
+        Some(1116),
+        "three returns two()+1000 = 1116",
+    );
+    // After wrapper body completes (line 42): 1116 + 11 = 1127.
+    assert_eq!(
+        last_stack0(42),
+        Some(1127),
+        "wrapper returns three()+11 = 1127",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// loop_iteration_test.masm -- repeat.N + while.true per-iteration steps
+// (closes M9 deferred `test_control_flow_repeat_emits_step_per_iteration`
+// in the foundational shape; while-loop branch is the new contribution).
+// ---------------------------------------------------------------------------
+
+/// Records `loop_iteration_test.masm` and pins the per-iteration
+/// step counts for both `repeat.3` (single-line body at line 25 ->
+/// 3 steps) and `while.true` whose body lives at lines 35/36/37
+/// (3 iterations -> 9 steps).  Strict assertions on the entire
+/// step sequence ensure the recorder's `step_first_op` revisit
+/// signal fires for both loop kinds without any double counting.
+#[test]
+fn test_loop_iteration_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_loop_iteration_test_via_ct_print_full",
+        "loop_iteration_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec!["#exec::#main", "#exec::repeat_three", "#exec::while_three"],
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(21), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 21 step + 3 call_entry + 3 call_exit = 27.
+    assert_eq!(events.len(), 27, "events.len()");
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::repeat_three".to_string(),
+            "#exec::while_three".to_string(),
+        ],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "#exec::repeat_three".to_string(),
+            "#exec::while_three".to_string(),
+            "#exec::#main".to_string(),
+        ],
+    );
+
+    // ----- repeat.3 per-iteration steps -------------------------------
+    let repeat_body_steps = events
+        .iter()
+        .filter(|e| e["kind"] == "step" && e["line"].as_i64() == Some(25))
+        .count();
+    assert_eq!(
+        repeat_body_steps, 3,
+        "repeat.3 single-line body must emit one step per iteration"
+    );
+
+    // ----- while.true per-iteration steps -----------------------------
+    // Body lives at lines 35, 36, 37 -- 3 iterations * 3 lines = 9.
+    let while_body_steps = events
+        .iter()
+        .filter(|e| {
+            e["kind"] == "step" && matches!(e["line"].as_i64(), Some(35) | Some(36) | Some(37))
+        })
+        .count();
+    assert_eq!(
+        while_body_steps, 9,
+        "while.true 3-line body * 3 iterations = 9 step events",
+    );
+
+    // ----- Final accumulator check ------------------------------------
+    // repeat_three accumulates 3 (from 0 + 1 + 1 + 1) into
+    // local[0].  The step at line 27 (the `loc_load.0` exit of
+    // repeat_three) carries the value as `local[0]`.
+    let local0_at_27 = first_var_in_step(&doc, "local[0]", |e| e["line"].as_i64() == Some(27));
+    assert_eq!(
+        local0_at_27,
+        Some(3),
+        "repeat_three.3 produces local[0]=3 on exit",
+    );
+
+    // while_three accumulates 3 into local[1] after counting 3
+    // iterations.  Line 39 = `loc_load.1` exit-of-while_three.
+    let local1_at_39 = first_var_in_step(&doc, "local[1]", |e| e["line"].as_i64() == Some(39));
+    assert_eq!(
+        local1_at_39,
+        Some(3),
+        "while_three iterates 3 times -> local[1]=3 on exit",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// proc_call_syscall_test.masm -- exec.X / call.X / syscall.X kind tags
+// ---------------------------------------------------------------------------
+
+/// Records `proc_call_syscall_test.masm` and pins:
+/// * Function table: outer + inner + #main.
+/// * Call sequence: #main (synthesised) -> outer (kind=Call)
+///   -> inner (kind=Exec).
+/// * The static call-graph parser distinguishes all three
+///   prefixes (`exec.`, `call.`, `syscall.`) -- verified
+///   directly via `tracer::parse_call_kinds` so the syscall
+///   branch is exercised even though no kernel is registered
+///   at runtime.  This is the precondition for cross-context
+///   calls and (eventually) the transaction-kernel hookup.
+#[test]
+fn test_proc_call_syscall_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_proc_call_syscall_test_via_ct_print_full",
+        "proc_call_syscall_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec!["#exec::#main", "#exec::inner", "#exec::outer"],
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(6), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 6 step + 3 call_entry + 3 call_exit = 12.
+    assert_eq!(events.len(), 12, "events.len()");
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::outer".to_string(),
+            "#exec::inner".to_string(),
+        ],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "#exec::inner".to_string(),
+            "#exec::outer".to_string(),
+            "#exec::#main".to_string(),
+        ],
+    );
+
+    // ----- inner returns 7 + 10 = 17 on top of stack ------------------
+    // Step at line 46 (the `add` inside inner) carries the result
+    // on stack[0] post-add.
+    assert_eq!(
+        first_var_in_step(&doc, "stack[0]", |e| e["line"].as_i64() == Some(46)),
+        Some(17),
+        "inner's add: 7 + 10 = 17 on stack[0]",
+    );
+
+    // ----- Static call-kind detection (Exec / Call / SysCall) ---------
+    // The runtime trace cannot distinguish call.X from exec.X
+    // (Miden's asmop info lacks a kind tag) so the recorder
+    // exposes the static call-graph kind via parse_call_kinds.
+    // We pin all three kinds here so the SysCall branch stays
+    // exercised even though our default-Assembler runtime cannot
+    // execute syscall.X without a kernel library.
+    let source = std::fs::read_to_string(&source_path).expect("read source");
+    let kinds = codetracer_miden_recorder::tracer::parse_call_kinds(&source);
+
+    use codetracer_miden_recorder::tracer::CallKind;
+    let main_callees = kinds.get("#main").expect("#main in graph");
+    assert_eq!(
+        main_callees.get("outer"),
+        Some(&CallKind::Call),
+        "begin should classify `call.outer` as CallKind::Call",
+    );
+    let outer_callees = kinds.get("outer").expect("outer in graph");
+    assert_eq!(
+        outer_callees.get("inner"),
+        Some(&CallKind::Exec),
+        "outer should classify `exec.inner` as CallKind::Exec",
+    );
+    // The fixture also declares (in a comment-free token stream
+    // form) a `syscall.X` reference inside `kernel_stub` to
+    // exercise the SysCall branch of the static parser.  That
+    // procedure is never invoked at runtime but is parsed at
+    // assembly time -- which would fail if no procedure named X
+    // existed, so we rely on the parser's source-level scan.
+    // Confirm the SysCall arm of the parser is exercised by
+    // calling it directly with a synthetic source string.
+    let synthetic = "proc.kernel_stub.0\nsyscall.foo\nend\nbegin\nexec.kernel_stub\nend\n";
+    let synthetic_kinds = codetracer_miden_recorder::tracer::parse_call_kinds(synthetic);
+    assert_eq!(
+        synthetic_kinds
+            .get("kernel_stub")
+            .and_then(|m| m.get("foo")),
+        Some(&CallKind::SysCall),
+        "static parser must classify `syscall.X` as CallKind::SysCall",
+    );
+
+    assert_eq!(CallKind::Exec.as_tag(), "Exec", "tag round-trip for Exec",);
+    assert_eq!(CallKind::Call.as_tag(), "Call", "tag round-trip for Call");
+    assert_eq!(
+        CallKind::SysCall.as_tag(),
+        "SysCall",
+        "tag round-trip for SysCall",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// memory_word_ops_test.masm -- mem_storew / mem_loadw -> Word as Sequence
+// ---------------------------------------------------------------------------
+
+/// Records `memory_word_ops_test.masm` and pins:
+///   * Function table: word_writer + word_reader + #main.
+///   * The `mem_loadw` step at line 39 emits a typed
+///     `ValueRecord::Sequence` named `word` whose decoded
+///     elements are `[4, 3, 2, 1]` (the reverse of the original
+///     push order, per Miden's `mem_storew` stack-to-memory
+///     mapping).
+#[test]
+fn test_memory_word_ops_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_memory_word_ops_test_via_ct_print_full",
+        "memory_word_ops_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec!["#exec::#main", "#exec::word_reader", "#exec::word_writer"],
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::word_writer".to_string(),
+            "#exec::word_reader".to_string(),
+        ],
+    );
+
+    // ----- The `word` Sequence value at line 39 (mem_loadw) ----------
+    // The Word type is registered eagerly with TypeKind::Seq, so
+    // the decoded ValueRecord must be `kind == "Sequence"` with
+    // four `Int` felt elements.
+    let events = doc["events"].as_array().expect("events array");
+    let mem_loadw_step = events
+        .iter()
+        .find(|e| {
+            e["kind"] == "step"
+                && e["line"].as_i64() == Some(39)
+                && e["vars"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|v| v["varname"] == "word")
+        })
+        .expect("expected step at line 39 carrying a `word` variable");
+    let word_var = mem_loadw_step["vars"]
+        .as_array()
+        .expect("vars array")
+        .iter()
+        .find(|v| v["varname"] == "word")
+        .expect("word var");
+    let word_value = &word_var["value"];
+    assert_eq!(
+        word_value["kind"].as_str(),
+        Some("Sequence"),
+        "word should decode as a Sequence; got {word_value}",
+    );
+    let elements = word_value["elements"]
+        .as_array()
+        .expect("Sequence.elements array");
+    let element_ints: Vec<i64> = elements
+        .iter()
+        .map(|e| {
+            assert_eq!(
+                e["kind"].as_str(),
+                Some("Int"),
+                "word element should be Int"
+            );
+            e["i"].as_i64().expect("Int.i")
+        })
+        .collect();
+    assert_eq!(
+        element_ints,
+        vec![4, 3, 2, 1],
+        "mem_loadw round-trip preserves [4, 3, 2, 1] (reverse of push order)",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// local_word_ops_test.masm -- loc_storew / loc_loadw -> Word as Sequence
+// ---------------------------------------------------------------------------
+
+/// Records `local_word_ops_test.masm` and pins the analogous
+/// typed-Word emission for procedure-local memory.  The
+/// `loc_loadw.0` op is multi-cycle so the post-load Word lands
+/// on the NEXT asmop boundary (the recorder's `pending_word`
+/// drain path); the test verifies the Word is `[40, 30, 20, 10]`.
+#[test]
+fn test_local_word_ops_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_local_word_ops_test_via_ct_print_full",
+        "local_word_ops_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::word_local"],);
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["#exec::#main".to_string(), "#exec::word_local".to_string()],
+    );
+
+    // ----- Find the `word` Sequence value -----------------------------
+    // For loc_loadw (multi-cycle), the recorder's pending_word
+    // drain emits at the NEXT cycle_idx==1 boundary -- which
+    // lands on the `drop` op back in #main (line 27 in the
+    // fixture).  Find ANY step that carries a `word` variable so
+    // the test stays robust to small fixture line shifts.
+    let events = doc["events"].as_array().expect("events array");
+    let word_step = events
+        .iter()
+        .find(|e| {
+            e["kind"] == "step"
+                && e["vars"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|v| v["varname"] == "word")
+        })
+        .expect("expected exactly one step carrying a `word` variable");
+    let word_var = word_step["vars"]
+        .as_array()
+        .expect("vars array")
+        .iter()
+        .find(|v| v["varname"] == "word")
+        .expect("word var");
+    let word_value = &word_var["value"];
+    assert_eq!(
+        word_value["kind"].as_str(),
+        Some("Sequence"),
+        "loaded word should decode as Sequence; got {word_value}",
+    );
+    let elements = word_value["elements"]
+        .as_array()
+        .expect("Sequence.elements array");
+    let element_ints: Vec<i64> = elements
+        .iter()
+        .map(|e| {
+            assert_eq!(
+                e["kind"].as_str(),
+                Some("Int"),
+                "word element should be Int"
+            );
+            e["i"].as_i64().expect("Int.i")
+        })
+        .collect();
+    assert_eq!(
+        element_ints,
+        vec![40, 30, 20, 10],
+        "loc_loadw.0 round-trip preserves the stored word [40, 30, 20, 10]",
+    );
+
+    // ----- Exactly one `word` value across the trace ------------------
+    // The fixture issues a single loc_storew/loc_loadw pair so
+    // the typed Word should appear exactly once.  Any duplicate
+    // surfacing is a recorder regression (the `pending_word`
+    // drain must not double-emit).
+    let word_count = events
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .flat_map(|e| e["vars"].as_array().cloned().unwrap_or_default())
+        .filter(|v| v["varname"] == "word")
+        .count();
+    assert_eq!(
+        word_count, 1,
+        "exactly one `word` Sequence must be emitted across the whole trace",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// assertion_error_codes_test.masm -- assertz.err= preserves error code
+// ---------------------------------------------------------------------------
+
+/// Records `assertion_error_codes_test.masm` and pins:
+///   * The recorder's outer `record()` returns Ok cleanly (the
+///     trace is finalised even though the VM aborted).
+///   * Exactly one `ioError` event is emitted.
+///   * The user-supplied `err="err=42"` modifier is preserved
+///     verbatim in the io_event text payload (parallel to
+///     Cairo's panic-felt and Move's abort-code routing).
+#[test]
+fn test_assertion_error_codes_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_assertion_error_codes_test_via_ct_print_full",
+        "assertion_error_codes_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+
+    // The function table contains only `boom` because the
+    // failing assertz aborts before control returns to #main
+    // (same convention as `assertion_fail_test.masm`).
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec!["#exec::boom"],
+        "failing assertz aborts before #main is observed",
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["calls"].as_u64(), Some(0), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(1),
+        "exactly one ioError must be emitted; counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    let io_event = events
+        .iter()
+        .find(|e| e["kind"] == "io")
+        .expect("expected one io event");
+    assert_eq!(io_event["io_kind"].as_str(), Some("ioError"));
+    let text = io_event["text"].as_str().expect("io.text");
+    // The user-supplied err="err=42" modifier must appear
+    // verbatim in the diagnostic text.  This is the contract
+    // that downstream "step to error" UIs rely on to surface
+    // the user's error code.
+    assert!(
+        text.contains("err=42"),
+        "io.text should preserve the user-supplied error code `err=42`; got `{text}`",
+    );
+    // The Miden runtime formats failing assertions as
+    // "assertion failed at clock cycle N with error message: ..."
+    // so we also pin the leading prefix to keep the diagnostic
+    // shape stable.
+    assert!(
+        text.starts_with("assertion failed at clock cycle"),
+        "io.text should start with the canonical Miden assertion-failure prefix; got `{text}`",
+    );
+}

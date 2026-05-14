@@ -1,0 +1,55 @@
+# memory_word_ops_test.masm
+#
+# Exercises the Word-level memory operations `mem_storew` and
+# `mem_loadw` so the recorder can surface the 4-felt Word as a
+# typed Sequence ValueRecord.  In Miden a "Word" is the canonical
+# 4-element compound value (analogous to a Cairo felt word, a
+# Move struct or an EVM 256-bit word) used everywhere from hash
+# digests to commitment roots.
+#
+# The fixture stores the four felts {1, 2, 3, 4} as a Word at
+# address 200 via `mem_storew`, then reads them back via
+# `mem_loadw`.  The recorder must:
+#
+#   1. Surface each 4-felt Word read by `mem_loadw` as a single
+#      `ValueRecord::Sequence { elements: [Int(4), Int(3), Int(2),
+#      Int(1)], ... }` value (variable name `word`).  The word's
+#      stack-order is the reverse of the original push order
+#      because `mem_storew` reverses the stack-to-memory mapping
+#      (see Miden 0.14 `op_mstorew` docs).
+#   2. Continue to surface the per-felt stack[0..4] decomposition
+#      so existing assertions keep working.
+#
+# The Miden push.1.2.3.4 syntax pushes each value left-to-right so
+# the resulting stack is [4, 3, 2, 1, ...].  After mem_storew the
+# operand stack is unchanged (mem_storew preserves the word), so
+# we then dropw to clear it before mem_loadw rebuilds it.
+
+proc.word_writer.0
+    push.1 push.2 push.3 push.4
+    push.200
+    mem_storew
+    drop
+    dropw
+end
+
+proc.word_reader.0
+    padw
+    push.200
+    mem_loadw
+end
+
+begin
+    # Leading push so #main is the first observed asmop context
+    # and the recorder synthesises a register_call for it.  Same
+    # workaround as `loop_iteration_test.masm`; without it the
+    # static chain to `word_writer` has length 2 and the
+    # chain-synthesis pre-pass skips the leaf-only case, leaving
+    # `word_writer` registered in the function table but absent
+    # from the call_entry sequence.
+    push.0
+    exec.word_writer
+    exec.word_reader
+    drop
+    dropw
+end
