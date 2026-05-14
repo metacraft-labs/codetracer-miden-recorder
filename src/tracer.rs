@@ -12,6 +12,7 @@ use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
 use eyre::{Context, Result, eyre};
 use miden_assembly::Assembler;
 use miden_processor::{AsmOpInfo, DefaultHost, StackInputs, VmState, execute_iter};
+use miden_stdlib::StdLibrary;
 
 use crate::source_map::SourceMap;
 
@@ -87,15 +88,34 @@ impl MidenTracer {
         F: FnOnce(&mut (dyn TraceWriter + Send)) -> Result<()>,
     {
         // -- 1. Assemble in debug mode -----------------------------------------------
-        let assembler = Assembler::default().with_debug_mode(true);
+        // The MASM standard library is loaded so MASM sources can use
+        // `use.std::*` directives (e.g. `use.std::math::u64`,
+        // `use.std::sys`) and the assembler resolves the imported
+        // procedures.  Without this load, every `use.std::*`
+        // directive errors out at assembly time -- see
+        // `test-programs/masm/stdlib_imports_test.masm`.
+        let stdlib = StdLibrary::default();
+        let assembler = Assembler::default()
+            .with_debug_mode(true)
+            .with_library(stdlib.clone())
+            .map_err(|e| eyre!("failed to load miden stdlib: {e}"))?;
         let source_manager = assembler.source_manager();
         let program = assembler
             .assemble_program(source_path.to_path_buf())
             .map_err(|e| eyre!("assembly failed: {e}"))?;
 
         // -- 2. Execute with iterator -------------------------------------------------
+        // The host's MAST forest store must also receive the stdlib's
+        // MAST forest -- the assembler emits external references (32-byte
+        // root digests) for stdlib procedures and the processor resolves
+        // them by digest at runtime via the host.  Loading the stdlib
+        // into the assembler alone is not sufficient: the run-time error
+        // would be `no MAST forest contains the procedure with root
+        // digest 0x...`.
         let stack_inputs = StackInputs::default();
         let mut host = DefaultHost::default();
+        host.load_mast_forest(stdlib.mast_forest().clone())
+            .map_err(|e| eyre!("failed to load stdlib MAST forest into host: {e}"))?;
         let vm_state_iter = execute_iter(&program, stack_inputs, &mut host, source_manager);
 
         // -- 3. Build source map for byte-offset -> line mapping ----------------------

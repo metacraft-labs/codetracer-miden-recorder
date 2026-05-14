@@ -3287,3 +3287,227 @@ fn test_large_field_literal_test_via_ct_print_full() {
         .collect();
     assert_eq!(types, vec!["felt", "Word", "type_0"]);
 }
+
+// ---------------------------------------------------------------------------
+// stdlib_imports_test.masm -- `use.std::math::u64`, `use.std::sys`
+// ---------------------------------------------------------------------------
+
+/// Records `stdlib_imports_test.masm` and pins the M10-deferred
+/// expectation that imported MASM-stdlib procedures surface in the
+/// recorder's function table under their fully-qualified
+/// module-prefixed names (`std::math::u64::wrapping_add`,
+/// `std::math::u64::wrapping_mul`, `std::sys::truncate_stack`)
+/// rather than as bare `wrapping_add` / `wrapping_mul` /
+/// `truncate_stack` entries.  The recorder follows assembler-inlined
+/// stdlib procedures into their bodies (the MASM stdlib is loaded
+/// via `Assembler::with_library(StdLibrary::default())` and the
+/// stdlib's MAST forest is registered with the host); without this
+/// the assembler errors out at compile time on every `use.std::*`
+/// directive (assembly failure) and the processor errors at run
+/// time on the unresolved external root digest.
+///
+/// The fixture exercises the two-felt-wide u64 calling convention
+/// `[b_hi, b_lo, a_hi, a_lo, ...] -> [c_hi, c_lo, ...]`.  Because
+/// `wrapping_add` is internally implemented as
+/// `exec.overflowing_add` followed by `drop`, the recorder also
+/// surfaces `std::math::u64::overflowing_add` as a separate entry
+/// in the function table -- which is exactly the
+/// "no-dropped-call_entry-events" guarantee in this test's spec.
+///
+/// Strict pins:
+///
+///   * Function table contains exactly seven entries (3 user
+///     procedures + 4 stdlib procedures, all module-prefixed).
+///   * Counts are pinned to the exact (steps, calls, io_events)
+///     triple produced by the recorder for this fixture against
+///     the `miden-stdlib v0.14` (with-debug-info) snapshot.
+///   * Call sequence and exit sequence cover every observed
+///     call_entry / call_exit -- the LIFO discipline closes
+///     `truncate_stack` before `wrapping_mul`, and `mul_op` before
+///     `wrapping_add`, etc.
+///   * The two-felt result of `wrapping_add` (a=0x100000005,
+///     b=0x200000003 -> c_hi=3, c_lo=8) is observed at the
+///     `mul_op` call_entry boundary: stack quartet `[push.0,
+///     c_hi=3, c_lo=8, 0]` confirms the u64 add result lands two
+///     felts deep.
+///   * The two-felt result of `wrapping_mul` (a=0x100000000,
+///     b=2 -> c_hi=2, c_lo=0) is observed at the
+///     `truncate_stack` call_entry boundary: positions s1..s3 of
+///     the quartet show `[mul_hi=2, mul_lo=0, add_hi=3]`.  s0 is
+///     the `loc_storew.0` pre-state placeholder felt that
+///     `truncate_stack.4` materialises when its 4 local slots are
+///     allocated -- pinning it deterministically guards the FMP
+///     -relative addressing convention used by stdlib procedures
+///     that declare locals.
+#[test]
+fn test_stdlib_imports_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_stdlib_imports_test_via_ct_print_full",
+        "stdlib_imports_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    // The stdlib u64 ops still surface every felt as Int (no
+    // typed-u64 ValueRecord variant has landed); pinning Int
+    // explicitly makes a future tagged-u64 surface a hard test
+    // failure rather than a silent decode shape change.
+    assert_all_values_are_int(&doc);
+
+    // ----- Function table: full module-qualified stdlib entries -------
+    // The strict spec for this test: stdlib procedures appear
+    // under module-prefixed names (`std::math::u64::wrapping_add`,
+    // `std::sys::truncate_stack`, etc.) -- never as bare
+    // `wrapping_add` / `truncate_stack` strings.  Pinning the full
+    // sorted set of seven entries makes a regression to the bare
+    // form a hard failure here.  `overflowing_add` appears because
+    // `wrapping_add` body is `exec.overflowing_add drop` and the
+    // recorder follows the inlined call rather than collapsing it.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec![
+            "#exec::#main",
+            "#exec::add_op",
+            "#exec::mul_op",
+            "std::math::u64::overflowing_add",
+            "std::math::u64::wrapping_add",
+            "std::math::u64::wrapping_mul",
+            "std::sys::truncate_stack",
+        ],
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(19), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(7), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}",
+    );
+
+    // ----- Call sequence: every imported stdlib proc opens once -------
+    // Order reflects assembler inlining: `add_op` calls
+    // `wrapping_add`, whose body opens `overflowing_add` first
+    // (then `drop` returns to the wrapping_add context); the
+    // recorder observes `overflowing_add` as a fresh
+    // `context_name` BEFORE `wrapping_add` itself (which appears
+    // when control returns to wrapping_add's `drop`).  Pinning
+    // this order locks the stdlib-following discipline in place.
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::add_op".to_string(),
+            "std::math::u64::overflowing_add".to_string(),
+            "std::math::u64::wrapping_add".to_string(),
+            "#exec::mul_op".to_string(),
+            "std::math::u64::wrapping_mul".to_string(),
+            "std::sys::truncate_stack".to_string(),
+        ],
+    );
+
+    // ----- Exit sequence: strict LIFO closure including stdlib --------
+    // Mirrors the recorder's outermost-closed-last invariant:
+    // `truncate_stack` (last opened) closes first; `#main`
+    // (outermost) closes last.  The stdlib procedures slot into
+    // the LIFO queue exactly as the user-written ones do.
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "std::sys::truncate_stack".to_string(),
+            "std::math::u64::wrapping_mul".to_string(),
+            "#exec::mul_op".to_string(),
+            "std::math::u64::wrapping_add".to_string(),
+            "std::math::u64::overflowing_add".to_string(),
+            "#exec::add_op".to_string(),
+            "#exec::#main".to_string(),
+        ],
+    );
+
+    // ----- u64 wrapping_add result observed at mul_op entry -----------
+    // a = 0x0000_0001_0000_0005, b = 0x0000_0002_0000_0003
+    // a + b = 0x0000_0003_0000_0008 -> [c_hi=3, c_lo=8].
+    //
+    // After `add_op` returns, control is back in `#main`; the
+    // next observed asmop is `mul_op`'s body which begins with
+    // `push.0`.  The recorder snapshots the pre-`push.1` stack at
+    // mul_op's call_entry (cycle_idx==1 of `push.0` shows the
+    // post-`add_op` stack with `push.0` already on top): so s0=0
+    // (just-pushed), s1=c_hi=3, s2=c_lo=8, s3=0 (the original
+    // `push.0` from #main's leading instruction).  This pins the
+    // u64 add result two felts deep.
+    let mul_op_entry = unique_call_entry(&doc, "#exec::mul_op");
+    assert_eq!(
+        call_entry_args_s0_s3(mul_op_entry),
+        [0, 3, 8, 0],
+        "stack at mul_op entry: just-pushed 0, then wrapping_add result \
+         [c_hi=3, c_lo=8] from a=0x100000005 + b=0x200000003, then \
+         the leading push.0 from #main carried below",
+    );
+
+    // ----- u64 wrapping_mul result observed at truncate_stack entry ---
+    // a = 0x0000_0001_0000_0000 (= 2^32), b = 0x0000_0000_0000_0002
+    // (= 2), a * b = 0x0000_0002_0000_0000 -> [c_hi=2, c_lo=0].
+    //
+    // At truncate_stack's call_entry (`loc_storew.0` is the first
+    // asmop of the new context), the stack reflects the post-mul
+    // state with `loc_storew.0`'s FMP-relative bookkeeping
+    // already on top -- s0 carries the deterministic FMP-derived
+    // felt that `truncate_stack.4` materialises when its 4 local
+    // slots are allocated.  Positions s1..s3 carry the live data:
+    // s1=mul_hi=2, s2=mul_lo=0, s3=add_hi=3 (the next-deeper
+    // result felt from wrapping_add still resident on the stack
+    // because nothing has dropped it yet).  This pins both the
+    // u64 mul result and the FMP-relative addressing convention.
+    let truncate_entry = unique_call_entry(&doc, "std::sys::truncate_stack");
+    assert_eq!(
+        call_entry_args_s0_s3(truncate_entry),
+        [-4294967299, 2, 0, 3],
+        "stack at truncate_stack entry: FMP-relative loc-storew slot \
+         marker on top, then wrapping_mul result [mul_hi=2, mul_lo=0] \
+         and the carried add_hi=3 below",
+    );
+
+    // ----- The internal exec.overflowing_add is followed --------------
+    // wrapping_add's body is `exec.overflowing_add drop`; the
+    // recorder MUST emit a call_entry for overflowing_add (the
+    // "no-dropped-call_entry-events" spec).  Its call_entry args
+    // capture the four-felt u64 operand window
+    // [b_hi, b_lo, a_hi, a_lo] just before the addition runs --
+    // here [b_hi=2, b_lo=3, a_hi=1, a_lo=5] reordered through
+    // overflowing_add's leading `swap.1` into [s0=3, s1=2,
+    // s2=1, s3=5] (matching the dump).  Pinning this captures
+    // both the call-following AND the standard u64 stack-prep
+    // convention used by the stdlib's overflowing_add prologue.
+    let overflowing_add_entry = unique_call_entry(&doc, "std::math::u64::overflowing_add");
+    assert_eq!(
+        call_entry_args_s0_s3(overflowing_add_entry),
+        [3, 2, 1, 5],
+        "stack at overflowing_add entry: post-`swap.1` reordered u64 \
+         operand window, b_lo and b_hi swapped to position so the \
+         u32overflowing_add cascade can consume them",
+    );
+
+    // ----- Type table is the canonical 3-entry shape -------------------
+    // The stdlib path doesn't introduce any new ValueRecord
+    // variant or TypeKind; pinning the type table makes that
+    // explicit so a future tagged-u64 / Word-of-felts variant
+    // for stdlib results would surface here.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt", "Word", "type_0"]);
+}

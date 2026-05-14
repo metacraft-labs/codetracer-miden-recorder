@@ -463,6 +463,7 @@ dependencies = [
  "miden-core 0.14.0",
  "miden-processor 0.14.0",
  "miden-protocol",
+ "miden-stdlib",
  "miden-testing",
  "serde",
  "serde_json",
@@ -1953,6 +1954,16 @@ dependencies = [
  "regex",
  "thiserror 2.0.18",
  "walkdir",
+]
+
+[[package]]
+name = "miden-stdlib"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "887189ccce4f9bbf15dfdaff0e6842fb138a7432a8f21adde756fac114b07184"
+dependencies = [
+ "miden-assembly 0.14.0",
+ "miden-core 0.14.0",
 ]
 
 [[package]]
