@@ -1,0 +1,52 @@
+# loop_iteration_test.masm
+#
+# Exercises both `repeat.N` (statically-bounded loop) and
+# `while.true` (data-driven loop) so the recorder's per-iteration
+# step accounting can be validated independently from the
+# control-flow demo fixture.  The goal is to confirm that the
+# `step_first_op` revisit signal added in 8edaccd fires for both
+# loop kinds and produces exactly one step event per iteration of
+# any single-line body.
+#
+# repeat_three: `repeat.3` body lives entirely on one source line
+#               (`loc_load.0 push.1 add loc_store.0`) so without
+#               the revisit signal it would collapse to a single
+#               step event regardless of trip count.  After the
+#               fix the recorder must emit exactly 3 step events
+#               at that line.
+# while_three:  `while.true` body counts down from 3 to 0; the
+#               loop-condition refresh shares the same line as
+#               the body so the recorder must emit exactly 3
+#               step events for the loop body line as well.
+
+proc.repeat_three.1
+    push.0 loc_store.0
+    repeat.3
+        loc_load.0 push.1 add loc_store.0
+    end
+    loc_load.0
+end
+
+proc.while_three.2
+    push.3 loc_store.0
+    push.0 loc_store.1
+    loc_load.0 push.0 neq
+    while.true
+        loc_load.1 push.1 add loc_store.1
+        loc_load.0 push.1 sub loc_store.0
+        loc_load.0 push.0 neq
+    end
+    loc_load.1
+end
+
+begin
+    # A leading `push.0` keeps `#main` as the first observed
+    # asmop context so the recorder synthesises the main-call
+    # frame; otherwise the begin-block dispatches straight into
+    # `repeat_three` and the recorder cannot disambiguate the
+    # leaf from `#main` (the static chain length is only 2).
+    push.0
+    exec.repeat_three
+    exec.while_three
+    drop drop drop
+end

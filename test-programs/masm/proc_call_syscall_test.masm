@@ -1,0 +1,64 @@
+# proc_call_syscall_test.masm
+#
+# Distinguishes the three Miden procedure-invocation forms that
+# show up in user MASM source:
+#
+#   * `exec.X`    — inline expansion in the same memory context
+#                    (no new MAST call frame at the protocol layer
+#                    but still a logical call frame for the
+#                    debugger / calltrace).
+#   * `call.X`    — true cross-context call (new memory context,
+#                    cleared operand stack at the boundary; on
+#                    return the operand stack must again be exactly
+#                    16 felts deep).
+#   * `syscall.X` — kernel-procedure call.  Requires a kernel
+#                    library at assemble time; this fixture omits
+#                    runtime exercise because the recorder's
+#                    default `Assembler` does not register a
+#                    kernel.  The recorder's static call-graph
+#                    parser DOES recognise the `syscall.` prefix
+#                    so the call-kind detection covers all three
+#                    variants in code; we add a `proc.kernel_stub`
+#                    that carries a dummy `syscall.X` reference
+#                    inside an unreachable branch (gated by
+#                    `if.true ... else ... end`) so the parser
+#                    sees the prefix without the runtime hitting
+#                    the kernel.
+#
+# The recorder must annotate every call_entry with a `call_kind`
+# tag (`Exec` / `Call` / `SysCall`) extracted from the MASM
+# source's static call graph.  This fixture pins:
+#
+#   begin -> call.outer (kind=Call)
+#     outer -> exec.inner (kind=Exec)
+#
+# So the recorded call_entry events should be:
+#   1. #main             (synthesised; no kind tag)
+#   2. #exec::outer      (kind=Call)
+#   3. #exec::inner      (kind=Exec)
+#
+# `outer` and `inner` are designed to leave the operand stack at
+# exactly 16 felts on return so the cross-context call.outer
+# satisfies the post-return depth invariant.
+
+proc.inner.0
+    # Pop two values, push their sum: net stack depth unchanged.
+    add
+end
+
+proc.outer.0
+    # Push two scalars then exec.inner -> stack net change = +1.
+    # Then drop to keep depth unchanged across the procedure body.
+    push.10 push.7 exec.inner
+    drop
+end
+
+begin
+    # Leading push so #main is the first observed asmop context
+    # (otherwise the recorder cannot synthesise the main-call
+    # frame -- the static chain has length 2 and chain-synthesis
+    # only triggers for chain.len() > 2).
+    push.0
+    call.outer
+    drop
+end

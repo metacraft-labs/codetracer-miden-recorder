@@ -1,0 +1,29 @@
+# local_word_ops_test.masm
+#
+# Exercises the Word-level *local* memory operations `loc_storew`
+# and `loc_loadw`.  Mirrors `memory_word_ops_test.masm` but for
+# procedure-local memory (4 contiguous local slots).  The
+# recorder must surface the loaded Word as a `ValueRecord::Sequence`
+# of 4 Int felts named `local_word[N]` where N is the base slot.
+#
+# The local frame reserves 4 slots (one Word) at offset 0; the
+# Word {10, 20, 30, 40} is stored via `loc_storew.0` and read
+# back via `loc_loadw.0`.
+
+proc.word_local.4
+    push.10 push.20 push.30 push.40
+    loc_storew.0
+    dropw
+    padw
+    loc_loadw.0
+end
+
+begin
+    # Leading push so #main is the first observed asmop context
+    # (otherwise the recorder cannot synthesise a register_call
+    # for the leaf -- the static chain length is only 2).
+    push.0
+    exec.word_local
+    drop
+    dropw
+end

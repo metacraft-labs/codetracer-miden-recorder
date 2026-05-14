@@ -1,0 +1,32 @@
+# assertion_error_codes_test.masm
+#
+# Triggers a deliberate `assertz.err=...` failure with a
+# user-supplied error message.  Mirrors the existing
+# `assertion_fail_test.masm` but adds the Miden `err=` modifier
+# so the recorder's `EventLogKind::Error` payload preserves the
+# user-supplied error code in the io_event text.  Same convention
+# as Cairo's panic-felt and Move's abort-code routing: the user's
+# numeric / textual error tag must round-trip through the trace's
+# error channel so the GUI's "step to error" can show it.
+#
+# We use a string error message ("err=42") because
+# `assertz.err=42` (numeric) would assemble as a felt-encoded
+# error code surfacing only in the long-form Miden diagnostic
+# text; the more common convention in user MASM is the textual
+# tag, and matching on the literal `err=42` substring keeps the
+# test resilient against future formatting tweaks.
+
+proc.boom.0
+    # assertz pops the top of stack and errors when it is NOT
+    # zero -- pushing 1 guarantees the failure path is taken so
+    # the user-supplied err= modifier is emitted into the
+    # diagnostic.
+    push.1
+    assertz.err="err=42"
+    push.999
+end
+
+begin
+    exec.boom
+    drop
+end

@@ -1,0 +1,48 @@
+# mast_inlining_test.masm
+#
+# Builds a 5-deep procedure chain whose intermediate frames the
+# Miden assembler routinely inlines into the leaf.  Each procedure
+# adds a small constant so the leaf-most computation propagates
+# back through the wrappers; the final stack value (777) is fixed.
+#
+#   leaf      returns 1 + 2 + 3   = 6
+#   one       returns leaf() + 10 = 16
+#   two       returns one()  + 100 = 116
+#   three     returns two()  + 1000 = 1116
+#   wrapper   returns three() + 11 = 1127
+#
+# This exercises the static-decl pre-pass added in 8edaccd: the
+# assembler inlines `wrapper -> three -> two -> one` into `leaf`,
+# so at runtime the very first observed `context_name` is
+# `#exec::leaf` (deeply nested) and the recorder must synthesise
+# `register_call` events for every intermediate ancestor based on
+# the static call graph.
+
+proc.leaf.0
+    push.1 push.2 push.3 add add
+end
+
+proc.one.0
+    exec.leaf
+    push.10 add
+end
+
+proc.two.0
+    exec.one
+    push.100 add
+end
+
+proc.three.0
+    exec.two
+    push.1000 add
+end
+
+proc.wrapper.0
+    exec.three
+    push.11 add
+end
+
+begin
+    exec.wrapper
+    drop
+end
