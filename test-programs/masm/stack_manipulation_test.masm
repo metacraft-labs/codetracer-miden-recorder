@@ -1,0 +1,58 @@
+# stack_manipulation_test.masm
+#
+# Exercises the stack-shuffling family in isolation so the
+# recorder's stack-snapshot path is pinned across `dup.N`,
+# `swap.N`, `movup.N`, `movdn.N`, `padw`, and `dropw`.  The
+# fixture builds a known 16-element stack shape inside a single
+# procedure body, then runs each shuffle op so the post-op stack
+# has a stable, easily-asserted layout.
+#
+# This complements the existing `stack_manip_test.masm` (which
+# exercises the bare `dup` / `swap` / `movup.2` / `movdn.2`) by
+# adding the indexed `dup.N` / `swap.N` variants and verifying
+# the recorder surfaces the resulting stack permutation in the
+# top-4 stack snapshot at every step.
+
+proc.shuffle.0
+    # ----- Build [4, 3, 2, 1, 0, 0, ...] on the stack ---------
+    push.1 push.2 push.3 push.4
+
+    # ----- dup.3 -- copy stack[3] (=1) to top -----------------
+    # Stack before: [4, 3, 2, 1]
+    # Stack after : [1, 4, 3, 2, 1]
+    dup.3
+    drop
+
+    # ----- swap.2 -- swap stack[0] and stack[2] ---------------
+    # Stack before: [4, 3, 2, 1]
+    # Stack after : [2, 3, 4, 1]
+    swap.2
+    swap.2
+
+    # ----- movup.3 -- bring stack[3] (=1) to top --------------
+    # Stack before: [4, 3, 2, 1]
+    # Stack after : [1, 4, 3, 2]
+    movup.3
+    movdn.3
+
+    # ----- padw -- push four zeros (a Word of zeros) ----------
+    # Stack before: [4, 3, 2, 1, ...]
+    # Stack after : [0, 0, 0, 0, 4, 3, 2, 1, ...]
+    padw
+
+    # ----- dropw -- drop the top word -------------------------
+    # Stack before: [0, 0, 0, 0, 4, 3, 2, 1, ...]
+    # Stack after : [4, 3, 2, 1, ...]
+    dropw
+
+    # Drop the four working values so the procedure leaves the
+    # stack at the original depth.
+    drop drop drop drop
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+    exec.shuffle
+    drop
+end

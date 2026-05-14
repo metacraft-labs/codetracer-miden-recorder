@@ -1,0 +1,63 @@
+# u32_arithmetic_test.masm
+#
+# Exercises Miden's u32-domain arithmetic and bitwise operators so
+# the recorder's stack-snapshot path surfaces u32-typed results
+# distinguishable from generic felt-domain values.  The fixture
+# uses both `u32wrapping_*` (drops the overflow flag, leaves only
+# the wrapped result on the stack) and `u32overflowing_*`
+# (leaves both result and overflow flag) variants so a single
+# recorded trace covers both control-flow shapes.
+#
+# Procedure layout (each procedure leaves a single net value on the
+# stack so #main can drop them cleanly at the end):
+#
+#   wrap_ops      : (a=10, b=3) -> (a+b, a-b, a*b)             = (13, 7, 30)
+#   overflow_ops  : (a=0xFFFFFFFE, b=3) -> (sum_lo, ovf_flag)
+#                                       = (1, 1)
+#                  -- 0xFFFFFFFE + 3 wraps to 1 with overflow=1.
+#   bitwise_ops   : (a=0xF0, b=0x33) -> (a&b, a|b, a^b)
+#                                     = (0x30, 0xF3, 0xC3)
+#                                     = (48, 243, 195)
+#   shift_ops     : (a=0x10) -> (a<<2, a>>2) = (0x40, 0x04) = (64, 4)
+#
+# This is an entirely felt-arithmetic exercise from the recorder's
+# point of view (u32 ops still surface as `ValueRecord::Int`), so
+# the strict pin focuses on the post-op stack snapshot at known
+# source lines rather than on a hypothetical `TypeKind::Int(u32)`
+# tag.  The Miden 0.14 stack-snapshot path emits each top-of-stack
+# felt as `ValueRecord::Int { i, type_id = felt_type_id }`; that
+# is the contract this test pins.
+
+proc.wrap_ops.0
+    push.10 push.3 u32wrapping_add        # stack[0] = 13
+    push.10 push.3 u32wrapping_sub        # stack[0] =  7
+    push.10 push.3 u32wrapping_mul        # stack[0] = 30
+end
+
+proc.overflow_ops.0
+    push.0xFFFFFFFE push.3 u32overflowing_add
+    # leaves [overflow_flag, sum_lo, ...] -- top is the flag.
+end
+
+proc.bitwise_ops.0
+    push.0xF0 push.0x33 u32and            # stack[0] = 0x30 = 48
+    push.0xF0 push.0x33 u32or             # stack[0] = 0xF3 = 243
+    push.0xF0 push.0x33 u32xor            # stack[0] = 0xC3 = 195
+end
+
+proc.shift_ops.0
+    push.0x10 u32shl.2                    # stack[0] = 0x40 = 64
+    push.0x10 u32shr.2                    # stack[0] = 0x04 = 4
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+    exec.wrap_ops
+    exec.overflow_ops
+    exec.bitwise_ops
+    exec.shift_ops
+    # Drain the stack so the trace finalises cleanly.
+    drop drop drop drop drop drop drop drop
+    drop drop drop drop drop drop
+end
