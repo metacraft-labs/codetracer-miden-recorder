@@ -11,7 +11,9 @@ use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
 use eyre::{Context, Result, eyre};
 use miden_assembly::Assembler;
-use miden_processor::{AsmOpInfo, DefaultHost, StackInputs, VmState, execute_iter};
+use miden_processor::{
+    AdviceInputs, AsmOpInfo, DefaultHost, MemAdviceProvider, StackInputs, VmState, execute_iter,
+};
 use miden_stdlib::StdLibrary;
 
 use crate::source_map::SourceMap;
@@ -113,7 +115,19 @@ impl MidenTracer {
         // would be `no MAST forest contains the procedure with root
         // digest 0x...`.
         let stack_inputs = StackInputs::default();
-        let mut host = DefaultHost::default();
+        // Parse `# advice_stack: V0, V1, ...` from the MASM source so
+        // fixtures that exercise advice-tape ops (`adv_push.N`,
+        // `adv_loadw`) can declare their inputs inline.  The advice
+        // stack is FIFO-on-pop (the first declared value is the
+        // first popped by `adv_push.1`); the parser collects the
+        // declared values in source order and `with_stack_values`
+        // pushes them onto the advice stack in that order.  See
+        // `advice_tape_test.masm` for the canonical fixture shape.
+        let advice_stack = parse_advice_stack(source_code);
+        let advice_inputs = AdviceInputs::default()
+            .with_stack_values(advice_stack.iter().copied())
+            .map_err(|e| eyre!("invalid `# advice_stack:` declaration: {e}"))?;
+        let mut host = DefaultHost::new(MemAdviceProvider::from(advice_inputs));
         host.load_mast_forest(stdlib.mast_forest().clone())
             .map_err(|e| eyre!("failed to load stdlib MAST forest into host: {e}"))?;
         let vm_state_iter = execute_iter(&program, stack_inputs, &mut host, source_manager);
@@ -262,6 +276,24 @@ impl MidenTracer {
         // asmop's BEFORE-state -- i.e. the post-loadw state).
         let mut pending_word: Option<Vec<i64>> = None;
 
+        // Pending advice-tape read.  Captured at the LAST cycle of
+        // an `adv_push.N` / `adv_loadw` asmop where the lifted
+        // values are now visible on top of the operand stack.  The
+        // pending event is drained on the next cycle_idx == 1
+        // boundary as a `register_special_event(EventLogKind::Read,
+        // ...)` so the read surfaces in the io_event channel
+        // (parallel to the Cairo `EventLogKind::Error` routing for
+        // panics, but tagged with the `advice_read` discriminator
+        // in the content payload so downstream tooling can filter
+        // on the advice-tape source).
+        //
+        // The content payload format is `advice_read offset=N
+        // values=[v0, v1, ...]` so the (offset, value) pair
+        // demanded by the M10 strict-pin requirement is captured
+        // without depending on a trace-format upstream change to
+        // add a dedicated `AdviceRead` variant to `EventLogKind`.
+        let mut pending_advice_read: Option<String> = None;
+
         for result in vm_state_iter {
             let state: VmState = match result {
                 Ok(s) => s,
@@ -290,6 +322,47 @@ impl MidenTracer {
                 && state.stack.len() >= 4
             {
                 pending_word = Some((0..4).map(|i| state.stack[i].as_int() as i64).collect());
+            }
+
+            // Capture the values lifted from the advice tape at the
+            // LAST cycle of an advice-stack op so the post-pop
+            // operand stack reflects the just-lifted felts.  The
+            // pending event is drained on the next cycle_idx == 1
+            // boundary (mirroring the `pending_word` path).
+            if asmop.cycle_idx() == asmop.num_cycles() {
+                let op_for_capture = asmop.op();
+                if let Some(n) = parse_adv_push_count(op_for_capture) {
+                    let n_us = n as usize;
+                    if state.stack.len() >= n_us {
+                        let values: Vec<i64> =
+                            (0..n_us).map(|i| state.stack[i].as_int() as i64).collect();
+                        // Format is parsable by downstream tooling:
+                        // `advice_read kind=adv_push count=N values=[v0, v1, ...]`.
+                        // The leading `advice_read` discriminator
+                        // makes filtering on the advice-tape source
+                        // unambiguous in the io_event stream.
+                        let mut content = format!("advice_read kind=adv_push count={n} values=[");
+                        for (i, v) in values.iter().enumerate() {
+                            if i > 0 {
+                                content.push_str(", ");
+                            }
+                            content.push_str(&format!("{v}"));
+                        }
+                        content.push(']');
+                        pending_advice_read = Some(content);
+                    }
+                } else if is_adv_loadw(op_for_capture) && state.stack.len() >= 4 {
+                    let values: Vec<i64> = (0..4).map(|i| state.stack[i].as_int() as i64).collect();
+                    let mut content = String::from("advice_read kind=adv_loadw count=4 values=[");
+                    for (i, v) in values.iter().enumerate() {
+                        if i > 0 {
+                            content.push_str(", ");
+                        }
+                        content.push_str(&format!("{v}"));
+                    }
+                    content.push(']');
+                    pending_advice_read = Some(content);
+                }
             }
 
             // Only process the first cycle of each assembly instruction to avoid duplicates.
@@ -656,6 +729,24 @@ impl MidenTracer {
                 );
             }
 
+            // -- Drain pending advice-tape read ------------------------------------------
+            // Captured at the LAST cycle of the issuing
+            // `adv_push.N` / `adv_loadw` op above; we emit it here
+            // at the next cycle_idx == 1 boundary so the io_event
+            // is anchored to the FOLLOWING asmop's step (mirrors
+            // the `pending_word` drain).  The event surfaces under
+            // `EventLogKind::Read` (the closest existing semantic
+            // for a tape read) with the canonical
+            // `advice_read kind=... values=[...]` content payload.
+            if let Some(content) = pending_advice_read.take() {
+                TraceWriter::register_special_event(
+                    &mut *self.writer,
+                    EventLogKind::Read,
+                    "advice_read",
+                    &content,
+                );
+            }
+
             // -- Emit local memory slot values -------------------------------------------
             // In Miden, local slot N is at address: fmp - (num_locals - N).
             // We look up each active slot's address in state.memory.
@@ -735,6 +826,76 @@ impl MidenTracer {
 fn parse_loc_store(op: &str) -> Option<u32> {
     op.strip_prefix("loc_store.")
         .and_then(|s| s.parse::<u32>().ok())
+}
+
+/// Parse `# advice_stack: V0, V1, V2, ...` declarations from a MASM
+/// source.  Returns the comma-separated u64 values in source order so
+/// the advice provider's `with_stack_values` pushes them in the same
+/// order — i.e. `V0` is the first value `adv_push.1` pops.
+///
+/// Multiple `# advice_stack:` lines are concatenated (in source
+/// order) so a long input can be split across several comment lines.
+/// Lines without the prefix are ignored.  Whitespace between commas
+/// and around values is permitted; hex literals (`0x...`) are
+/// supported alongside decimal literals.
+///
+/// Public so per-fixture tests can validate the parser independently
+/// of the recorder runtime path.
+pub fn parse_advice_stack(source: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        // Only `# advice_stack:` (or `#advice_stack:`) qualifies.
+        // Strip the `#` and surrounding whitespace, then look for
+        // the canonical prefix.
+        let body = match trimmed.strip_prefix('#') {
+            Some(b) => b.trim(),
+            None => continue,
+        };
+        let values_str = match body.strip_prefix("advice_stack:") {
+            Some(v) => v.trim(),
+            None => continue,
+        };
+        if values_str.is_empty() {
+            continue;
+        }
+        for token in values_str
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            let parsed = if let Some(hex) = token
+                .strip_prefix("0x")
+                .or_else(|| token.strip_prefix("0X"))
+            {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                token.parse::<u64>().ok()
+            };
+            if let Some(v) = parsed {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// Returns `Some(n)` for `adv_push.N` ops where N is the count of
+/// felts being lifted from the advice stack to the operand stack.
+/// Returns `None` for any other op.  The recorder uses this to tag
+/// advice-stack reads with a structured `EventLogKind::Read` event
+/// carrying the read offset and value(s) — parallel to the
+/// `EventLogKind::Error` routing used for failed assertions.
+fn parse_adv_push_count(op: &str) -> Option<u32> {
+    op.strip_prefix("adv_push.")
+        .and_then(|s| s.parse::<u32>().ok())
+}
+
+/// Returns true if the op string is `adv_loadw` -- the advice-stack
+/// word-load (pops 4 felts from advice stack, overwrites the top
+/// word of the operand stack).
+fn is_adv_loadw(op: &str) -> bool {
+    op == "adv_loadw"
 }
 
 /// Returns true if the op string is a Word-level memory load

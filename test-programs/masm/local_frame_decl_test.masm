@@ -1,0 +1,52 @@
+# local_frame_decl_test.masm
+#
+# Exercises `proc.NAME.N` local-frame declarations with a procedure
+# that allocates 4 local slots (`proc.compute.4`) and writes /
+# reads each one with the felt-domain `loc_store.N` / `loc_load.N`
+# variants.  The strict pin asserts that:
+#
+#   * The recorder distinguishes each local slot by name in the
+#     value-events ledger: `local[0]`, `local[1]`, `local[2]`,
+#     `local[3]` all surface as separate variable names with the
+#     written value attached.
+#   * The four-slot frame allocation does not leak slots from a
+#     prior invocation -- each slot's value is the most recently
+#     stored constant.
+#
+# `compute` body layout (16 felts of FMP-relative storage):
+#
+#     proc.compute.4
+#         push.10 loc_store.0       <- write slot 0 = 10
+#         push.20 loc_store.1       <- write slot 1 = 20
+#         push.30 loc_store.2       <- write slot 2 = 30
+#         push.40 loc_store.3       <- write slot 3 = 40
+#         loc_load.0                <- read slot 0 (10)
+#         loc_load.1                <- read slot 1 (20)
+#         loc_load.2                <- read slot 2 (30)
+#         loc_load.3                <- read slot 3 (40)
+#     end
+#
+# Each `loc_store.N` triggers the recorder's active-locals
+# tracking: from the next step onward, the corresponding
+# `local[N]` variable surfaces in the per-step ledger.  After all
+# four stores complete, every subsequent step inside `compute`
+# carries all four `local[N]` names.
+
+proc.compute.4
+    push.10 loc_store.0
+    push.20 loc_store.1
+    push.30 loc_store.2
+    push.40 loc_store.3
+    loc_load.0
+    loc_load.1
+    loc_load.2
+    loc_load.3
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+    exec.compute
+    # Drain the 5 felts on top (4 loaded slots + leading push.0).
+    drop drop drop drop drop
+end

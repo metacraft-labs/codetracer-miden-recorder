@@ -1,0 +1,53 @@
+# if_else_branch_test.masm
+#
+# Exercises both arms of `if.true ... else ... end` so the
+# recorder's step-emission and line-attribution paths are
+# exercised on both the taken and the not-taken branch in a
+# single trace.  The strict pin asserts:
+#
+#   * `branch` is invoked twice -- once with flag=1 (true arm)
+#     and once with flag=0 (else arm).  Both invocations leave
+#     a distinct marker on top so each result is uniquely
+#     observable at the next call boundary.
+#   * Steps surface in BOTH arms (no dead-code elimination of
+#     the un-taken branch from the trace) -- the recorder must
+#     attribute each arm's body to its own source line, not
+#     collapse both onto the branch-decision line.
+#   * The `true` arm's body line and the `else` arm's body line
+#     are distinct in the per-step ledger.
+#
+# `branch` body layout:
+#
+#     proc.branch.0
+#         if.true                        <- branch decision
+#             push.111                   <- TRUE arm body (line N)
+#         else
+#             push.222                   <- FALSE arm body (line M)
+#         end
+#     end
+#
+# Driver pattern: `push.<flag> exec.branch` twice with flag=1
+# then flag=0.  Each invocation leaves the corresponding marker
+# (111 or 222) on top of the stack, observable at the next
+# call_entry's args quartet (or the trailing #main step).
+
+proc.branch.0
+    if.true
+        push.111
+    else
+        push.222
+    end
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+    # First invocation: flag=1 -> taken arm leaves 111 on top.
+    push.1
+    exec.branch
+    # Second invocation: flag=0 -> else arm leaves 222 on top.
+    push.0
+    exec.branch
+    # Drain the 3 felts on top (222, 111, 0_from_main).
+    drop drop drop
+end

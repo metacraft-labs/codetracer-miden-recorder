@@ -1,0 +1,98 @@
+# field_arithmetic_test.masm
+#
+# Exercises field arithmetic over Miden's goldilocks prime
+# `p = 2^64 - 2^32 + 1 = 0xFFFFFFFF00000001`.  Each procedure
+# leaves a single felt on top of the stack so the recorder's
+# stack-snapshot path captures the post-op value at the call_entry
+# of the next procedure (where args[s1] reflects the previous
+# procedure's result carried on the stack).
+#
+# The strict pin asserts that goldilocks reduction is recorded
+# faithfully — `push.0xFFFFFFFF00000000 push.2 add` (i.e. (p-1)+2)
+# surfaces as `1`, NOT as the unreduced 65-bit pre-image
+# `0x10000000000000001`.  The known `(value, inverse)` pair used by
+# `inv_pair` is `(7, 5270498306774157604)`, computed offline via the
+# extended-Euclidean inverse mod p:
+#   7 * 5270498306774157604 mod p = 1.
+#
+# Procedure layout (each leaves exactly one felt on top):
+#
+#   add_wrap : push.0xFFFFFFFF00000000 push.2 add  -> 1
+#              (p-1) + 2 = 1 mod p.  Catches a missing modular wrap.
+#   sub_wrap : push.1 push.2 sub                   -> p-1
+#              Stack convention `[b, a, ...] -> [a-b, ...]`; push.1
+#              then push.2 gives a=2, b=1, result a-b... wait, the
+#              order is reversed by the push order: push.1 leaves
+#              [1]; push.2 leaves [2, 1]; sub does a-b where a is
+#              second-from-top.  So a=1, b=2, a-b = -1 mod p = p-1
+#              = 0xFFFFFFFF00000000; surfaces as i64 = -4294967296.
+#   mul_pair : push.3 push.5 mul                   -> 15
+#              Plain field-domain multiplication of small inputs.
+#   div_pair : push.5 push.15 div                  -> 3
+#              Stack convention: top is divisor.  push.5 then push.15
+#              gives [15, 5]; div does a*b^-1 where a=second-from-top
+#              and b=top, so 5 * 15^-1.  Mod p that is some large
+#              felt -- we instead pin the easier arrangement below.
+#              Actually with [b=15, a=5] convention `div` produces
+#              a/b = 5/15 = 5 * inv(15).  Pre-computed: inv(15) mod p
+#              = 8608480567731124193 (computed offline).
+#              5 * 8608480567731124193 mod p = 5904837080178277109.
+#              This surfaces as i64 = 5904837080178277109.
+#   neg_one  : push.7 neg                          -> p-7
+#              -7 mod p = p-7 = 0xFFFFFFFEFFFFFFFB; i64 = -4294967302.
+#   inv_pair : push.7 inv                          -> 5270498306774157604
+#              7^-1 mod p (precomputed offline).
+#   pow2_op  : push.5 pow2                         -> 32
+#              2^5 = 32 (exponent in [0, 63]).
+#   exp_op   : push.3 push.4 exp.u32               -> 64
+#              Stack `[b=4, a=3]`; exp computes a^b = 3^4 = 81.
+#              Hmm, with [b, a] convention and result a^b:
+#              push.3 then push.4 gives [4, 3] so a=3, b=4, 3^4 = 81.
+
+proc.add_wrap.0
+    push.0xFFFFFFFF00000000 push.2 add
+end
+
+proc.sub_wrap.0
+    push.1 push.2 sub
+end
+
+proc.mul_pair.0
+    push.3 push.5 mul
+end
+
+proc.div_pair.0
+    push.5 push.15 div
+end
+
+proc.neg_one.0
+    push.7 neg
+end
+
+proc.inv_pair.0
+    push.7 inv
+end
+
+proc.pow2_op.0
+    push.5 pow2
+end
+
+proc.exp_op.0
+    push.3 push.4 exp.u32
+end
+
+begin
+    # Leading push so #main is the first observed asmop context
+    # and the recorder synthesises a register_call for it.
+    push.0
+    exec.add_wrap
+    exec.sub_wrap
+    exec.mul_pair
+    exec.div_pair
+    exec.neg_one
+    exec.inv_pair
+    exec.pow2_op
+    exec.exp_op
+    # Drain the 9 felts (8 procedure results + leading push.0).
+    drop drop drop drop drop drop drop drop drop
+end

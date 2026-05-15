@@ -1,0 +1,67 @@
+# hash_primitives_test.masm
+#
+# Exercises the three RPO (Rescue Prime Optimised) Poseidon2-derived
+# hash primitives Miden 0.14 surfaces at the MASM source level:
+#
+#   * `hash`    — single-shot 1-to-1 RPO hash of a 4-felt input,
+#                 producing a 4-felt digest.  19 cycles internally
+#                 but surfaces as a single asmop in the recorder's
+#                 cycle_idx==1 trace.
+#   * `hperm`   — full 12-felt Poseidon2 permutation on the top 3
+#                 words of the operand stack `[R0, R1, C, ...]`.
+#                 1 cycle.
+#   * `hmerge`  — 2-to-1 merge of two 4-felt digests `[A, B, ...]`
+#                 -> `[C, ...]`.  16 cycles.
+#
+# The strict pin asserts that each hash op surfaces as a distinct
+# step in the trace (the recorder aggregates the inner RPO rounds
+# under a single asmop boundary -- per the spec, "the recorder
+# should aggregate them under a single logical hash call_entry").
+# Each hash op is wrapped in a one-line procedure so the per-op
+# call_entry / call_exit boundary is the hash-call aggregation
+# unit.  The output digest of `hperm` is the canonical empty-input
+# Poseidon2 digest (top word of the post-permutation rate); we pin
+# the four felt elements against the reference value Miden's RPO
+# implementation produces for the all-zero input.
+#
+# Procedure layout (each op wrapped so its call_entry / call_exit
+# brackets the hash invocation):
+#
+#   hash_op   : padw hash                         <- 1-to-1 RPO of [0,0,0,0]
+#   hperm_op  : padw padw padw hperm              <- permutation of all-zero state
+#   hmerge_op : padw padw hmerge                  <- 2-to-1 merge of two zero-digests
+#
+# All three procedures consume a known input (all zeros via
+# `padw`) so the digest is deterministic and pinnable.
+
+proc.hash_op.0
+    padw
+    hash
+end
+
+proc.hperm_op.0
+    padw padw padw
+    hperm
+end
+
+proc.hmerge_op.0
+    padw padw
+    hmerge
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+    exec.hash_op
+    # `hash` leaves a 4-felt digest on top.  Drop it before the
+    # next op so each hash invocation starts from a clean slate.
+    dropw
+    exec.hperm_op
+    # `hperm` leaves the post-permutation state (3 words) on top.
+    # Drop all 12 felts.
+    dropw dropw dropw
+    exec.hmerge_op
+    # `hmerge` leaves a 4-felt digest.  Drop it too.
+    dropw
+    drop
+end
