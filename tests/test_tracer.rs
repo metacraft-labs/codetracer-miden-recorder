@@ -3511,3 +3511,920 @@ fn test_stdlib_imports_test_via_ct_print_full() {
         .collect();
     assert_eq!(types, vec!["felt", "Word", "type_0"]);
 }
+
+// ---------------------------------------------------------------------------
+// field_arithmetic_test.masm — goldilocks field arithmetic
+// ---------------------------------------------------------------------------
+
+/// Records `field_arithmetic_test.masm` and pins the recorder's
+/// goldilocks-reduction discipline:
+///
+///   * Eight per-op procedures (`add_wrap`, `sub_wrap`, `mul_pair`,
+///     `div_pair`, `neg_one`, `inv_pair`, `pow2_op`, `exp_op`),
+///     each leaving exactly one felt on top of the stack.
+///   * `add_wrap`'s `(p-1) + 2 = 1 mod p` reduction surfaces as
+///     `1` on the next procedure's call_entry args[s1] -- a missing
+///     modular wrap would yield the unreduced 65-bit pre-image
+///     `0x10000000000000001` instead.
+///   * `inv_pair` pins `inv(7) = 2635249152773512046` (= `(p+1)/7`,
+///     verified offline by `7 * 2635249152773512046 mod p == 1`)
+///     so a regression to a non-goldilocks inverse routine breaks
+///     loudly.
+///   * Negative-domain felts (`sub_wrap`'s `1-2 = p-1`,
+///     `neg_one`'s `-7 = p-7`) surface as the negative i64 reading
+///     of the same bit pattern, matching the
+///     `large_field_literal_test` round-trip.
+#[test]
+fn test_field_arithmetic_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_field_arithmetic_test_via_ct_print_full",
+        "field_arithmetic_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    // Field arithmetic still surfaces every felt as Int (no
+    // goldilocks-tagged variant has landed); pinning Int makes a
+    // future BigInt / typed-felt variant a hard test failure
+    // rather than a silent decode shape change.
+    assert_all_values_are_int(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec![
+            "#exec::#main",
+            "#exec::add_wrap",
+            "#exec::div_pair",
+            "#exec::exp_op",
+            "#exec::inv_pair",
+            "#exec::mul_pair",
+            "#exec::neg_one",
+            "#exec::pow2_op",
+            "#exec::sub_wrap",
+        ],
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(11), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(9), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 11 step + 9 call_entry + 9 call_exit = 29.
+    assert_eq!(events.len(), 29, "events.len()");
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::add_wrap".to_string(),
+            "#exec::sub_wrap".to_string(),
+            "#exec::mul_pair".to_string(),
+            "#exec::div_pair".to_string(),
+            "#exec::neg_one".to_string(),
+            "#exec::inv_pair".to_string(),
+            "#exec::pow2_op".to_string(),
+            "#exec::exp_op".to_string(),
+        ],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "#exec::add_wrap".to_string(),
+            "#exec::sub_wrap".to_string(),
+            "#exec::mul_pair".to_string(),
+            "#exec::div_pair".to_string(),
+            "#exec::neg_one".to_string(),
+            "#exec::inv_pair".to_string(),
+            "#exec::pow2_op".to_string(),
+            "#exec::exp_op".to_string(),
+            "#exec::#main".to_string(),
+        ],
+    );
+
+    // ----- Per-procedure call_entry quartet pinning -------------------
+    // Each procedure is invoked exactly once; the call_entry args
+    // capture the four-felt operand window AT cycle_idx==1 of the
+    // new procedure's first asmop.  The args[s1] slot reflects
+    // the PREVIOUS procedure's result (carried below the
+    // just-pushed top), so pinning the full quartet at each entry
+    // captures both the current procedure's first push and the
+    // chain of carried results from earlier procedures.
+    //
+    // add_wrap entry: cycle_idx==1 of `push.0xFFFFFFFF00000000`
+    // shows the literal already on top.  s1..s3 are the leading
+    // `push.0` from #main propagated through the empty padding.
+    //   0xFFFFFFFF00000000 as i64 = -4294967296.
+    assert_eq!(
+        call_entry_args_s0_s3(unique_call_entry(&doc, "#exec::add_wrap")),
+        [-4294967296, 0, 0, 0],
+        "add_wrap entry: pushed `p-1` literal on top",
+    );
+    // sub_wrap entry: first asmop is `push.1` which compiles to
+    // Pad+Incr; cycle_idx==1 catches Pad (top=0).  s1=1 IS the
+    // add_wrap result -- (p-1) + 2 = 1 mod p (the canonical
+    // goldilocks-reduction pin).
+    assert_eq!(
+        call_entry_args_s0_s3(unique_call_entry(&doc, "#exec::sub_wrap")),
+        [0, 1, 0, 0],
+        "sub_wrap entry: s1 carries add_wrap's reduced result \
+         `(p-1)+2 mod p == 1` -- a missing modular reduction would \
+         surface here as the 65-bit unreduced sum",
+    );
+    // mul_pair entry: cycle_idx==1 of `push.3` shows 3 already on
+    // top.  s1=-4294967296 IS the sub_wrap result `1-2 mod p =
+    // p-1 = 0xFFFFFFFF00000000`.
+    assert_eq!(
+        call_entry_args_s0_s3(unique_call_entry(&doc, "#exec::mul_pair")),
+        [3, -4294967296, 1, 0],
+        "mul_pair entry: s1 carries sub_wrap's `1-2 mod p = p-1`",
+    );
+    // div_pair entry: cycle_idx==1 of `push.5` shows 5 already on
+    // top.  s1=15 IS mul_pair's `3*5 = 15`.
+    assert_eq!(
+        call_entry_args_s0_s3(unique_call_entry(&doc, "#exec::div_pair")),
+        [5, 15, -4294967296, 1],
+        "div_pair entry: s1 carries mul_pair's `3*5 = 15`",
+    );
+    // neg_one entry: cycle_idx==1 of `push.7` shows 7 already on
+    // top.  s1 = div_pair's result.  Miden's `div` with stack
+    // `[b=15, a=5]` computes `a*b^-1 = 5 * inv(15) mod p`.  The
+    // observed value -6148914694099828735 verifies as `5 *
+    // inv(15) mod p`.
+    assert_eq!(
+        call_entry_args_s0_s3(unique_call_entry(&doc, "#exec::neg_one")),
+        [7, -6148914694099828735, 15, -4294967296],
+        "neg_one entry: s1 carries div_pair's `5/15 mod p`",
+    );
+    // inv_pair entry: cycle_idx==1 of `push.7` shows 7 already on
+    // top.  s1=-4294967302 IS neg_one's result `-7 mod p = p-7 =
+    // 0xFFFFFFFEFFFFFFFA`.
+    assert_eq!(
+        call_entry_args_s0_s3(unique_call_entry(&doc, "#exec::inv_pair")),
+        [7, -4294967302, -6148914694099828735, 15],
+        "inv_pair entry: s1 carries `-7 mod p = p-7`",
+    );
+    // pow2_op entry: cycle_idx==1 of `push.5` shows 5 already on
+    // top.  s1=2635249152773512046 IS the inverse of 7 mod p
+    // (verified offline: 7 * 2635249152773512046 mod p == 1; this
+    // value equals (p+1)/7 since p ≡ -1 mod 7 in goldilocks).
+    assert_eq!(
+        call_entry_args_s0_s3(unique_call_entry(&doc, "#exec::pow2_op")),
+        [5, 2635249152773512046, -4294967302, -6148914694099828735],
+        "pow2_op entry: s1 carries `inv(7) mod p = 2635249152773512046` \
+         (verified: 7 * this == 1 mod p)",
+    );
+    // exp_op entry: cycle_idx==1 of `push.3` shows 3 already on
+    // top.  s1=32 IS pow2_op's `2^5 = 32`.
+    assert_eq!(
+        call_entry_args_s0_s3(unique_call_entry(&doc, "#exec::exp_op")),
+        [3, 32, 2635249152773512046, -4294967302],
+        "exp_op entry: s1 carries pow2_op's `2^5 = 32`",
+    );
+
+    // ----- Type table: still the canonical 3-entry shape -------------
+    // Field arithmetic does not introduce a new ValueRecord variant
+    // or TypeKind; pinning the type table makes that explicit so a
+    // future tagged-felt or BigInt variant for goldilocks felts
+    // would surface here.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt", "Word", "type_0"]);
+}
+
+// ---------------------------------------------------------------------------
+// if_else_branch_test.masm — both arms of `if.true ... else ... end`
+// ---------------------------------------------------------------------------
+
+/// Records `if_else_branch_test.masm` and pins the recorder's
+/// branch-arm coverage:
+///
+///   * `branch` is invoked twice from `#main` -- once with flag=1
+///     (taken arm) and once with flag=0 (else arm) -- so both
+///     arms execute in the same trace.  Function table contains
+///     just `branch` and `#main`; the per-arm bodies are part of
+///     `branch`'s body, not separate procedures.
+///   * Each arm's body line surfaces in the per-step ledger:
+///     line 36 (`push.111`, TRUE arm) carries `stack[0] = 111`,
+///     and line 38 (`push.222`, ELSE arm) carries `stack[0] = 222`.
+///     The recorder distinguishes the two arms by source line
+///     rather than collapsing them onto the branch-decision line.
+///   * Both branch invocations open and close cleanly: counts.calls
+///     = 3 (`#main` + 2 × `branch`), and the call_entry args carry
+///     the previous invocation's result through to the next one.
+#[test]
+fn test_if_else_branch_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_if_else_branch_test_via_ct_print_full",
+        "if_else_branch_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    assert_all_values_are_int(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::branch"]);
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(9), "steps; counts={counts}");
+    // 3 calls: synthesised #main + the two `exec.branch` invocations.
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 9 step + 3 call_entry + 3 call_exit = 15.
+    assert_eq!(events.len(), 15, "events.len()");
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::branch".to_string(),
+            "#exec::branch".to_string(),
+        ],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "#exec::branch".to_string(),
+            "#exec::branch".to_string(),
+            "#exec::#main".to_string(),
+        ],
+    );
+
+    // ----- TRUE-arm step at line 36 carries stack[0] = 111 -----------
+    // After the first exec.branch (flag=1), the `push.111` of the
+    // TRUE arm runs and the recorder emits a step at line 36 with
+    // `stack[0] = 111`.  This is the canonical "TRUE arm reached"
+    // signal.  The step is attributed to #main (the writer's
+    // current frame after `call_exit branch` for the first
+    // invocation) -- the line is what matters for branch-arm
+    // coverage, not the frame attribution.
+    let true_arm_steps: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "step" && e["line"].as_i64() == Some(36))
+        .collect();
+    assert_eq!(
+        true_arm_steps.len(),
+        1,
+        "exactly one step on TRUE-arm line 36 (push.111)",
+    );
+    let true_arm_s0 = true_arm_steps[0]["vars"]
+        .as_array()
+        .expect("vars array")
+        .iter()
+        .find(|v| v["varname"] == "stack[0]")
+        .and_then(|v| v["value"]["i"].as_i64())
+        .expect("stack[0] on TRUE-arm step");
+    assert_eq!(
+        true_arm_s0, 111,
+        "TRUE arm pushed 111 on top -- step at line 36 must observe it",
+    );
+
+    // ----- ELSE-arm step at line 38 carries stack[0] = 222 -----------
+    // After the second exec.branch (flag=0), the `push.222` of the
+    // ELSE arm runs and the recorder emits a step at line 38 with
+    // `stack[0] = 222`.  Symmetric to the TRUE-arm pin above.
+    let else_arm_steps: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "step" && e["line"].as_i64() == Some(38))
+        .collect();
+    assert_eq!(
+        else_arm_steps.len(),
+        1,
+        "exactly one step on ELSE-arm line 38 (push.222)",
+    );
+    let else_arm_s0 = else_arm_steps[0]["vars"]
+        .as_array()
+        .expect("vars array")
+        .iter()
+        .find(|v| v["varname"] == "stack[0]")
+        .and_then(|v| v["value"]["i"].as_i64())
+        .expect("stack[0] on ELSE-arm step");
+    assert_eq!(
+        else_arm_s0, 222,
+        "ELSE arm pushed 222 on top -- step at line 38 must observe it",
+    );
+
+    // ----- Branch-decision line 35 surfaces, distinct from arm bodies
+    // The `if.true` line emits a step in BOTH invocations -- two
+    // distinct step events both at line 35 (one per branch call).
+    // Pinning the count to exactly 2 catches a regression that
+    // would either collapse both arm bodies onto line 35 (would
+    // give 4) or drop one of the if.true steps (would give 1).
+    let if_true_steps = events
+        .iter()
+        .filter(|e| e["kind"] == "step" && e["line"].as_i64() == Some(35))
+        .count();
+    assert_eq!(
+        if_true_steps, 2,
+        "branch-decision line 35 (`if.true`) emits one step per invocation -- two total",
+    );
+
+    // ----- Lines 36 and 38 are DISTINCT from line 35 -----------------
+    // The strict pin: the recorder attributes the TRUE-arm body
+    // (line 36) and the ELSE-arm body (line 38) to their own
+    // source lines, NOT collapsing them onto the branch-decision
+    // line 35.  Already implicit in the per-line counts above
+    // (line 36 has 1 step, line 38 has 1 step, line 35 has 2
+    // steps); making it explicit guards against any future
+    // regression where the recorder might dedupe an arm-body
+    // line into the branch-decision line.
+    let mut arm_body_lines: Vec<i64> = events
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .filter_map(|e| e["line"].as_i64())
+        .filter(|line| *line == 36 || *line == 38)
+        .collect();
+    arm_body_lines.sort_unstable();
+    arm_body_lines.dedup();
+    assert_eq!(
+        arm_body_lines,
+        vec![36i64, 38],
+        "arm-body lines 36 (TRUE) and 38 (ELSE) must surface as distinct \
+         step lines, not collapsed onto the branch-decision line 35",
+    );
+
+    // ----- call_entry args quartet for each branch invocation --------
+    // The recorder stages the operand-stack top at every call
+    // boundary; pinning the full quartet catches any per-call
+    // regression in the arg-staging path.
+    let branch_entries: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry" && e["function"].as_str() == Some("#exec::branch"))
+        .collect();
+    assert_eq!(branch_entries.len(), 2, "exactly two branch call_entries");
+    // First invocation (flag=1): cycle_idx==1 of the first asmop
+    // inside `branch` -- the inlined `if.true`-driven body -- shows
+    // the post-flag-pop padding on top (zeros all the way down
+    // because nothing else has been pushed yet).
+    assert_eq!(
+        call_entry_args_s0_s3(branch_entries[0]),
+        [0, 0, 0, 0],
+        "first branch entry: post-flag-pop padding visible on top",
+    );
+    // Second invocation (flag=0): the FIRST invocation left 111
+    // on top.  After `push.0` (the second flag-push) and the
+    // flag-pop at branch entry, s0 carries that 111 forward.
+    assert_eq!(
+        call_entry_args_s0_s3(branch_entries[1]),
+        [111, 0, 0, 0],
+        "second branch entry: first invocation's TRUE-arm result \
+         (111) visible on top after the second flag has been consumed",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// local_frame_decl_test.masm — proc.NAME.N FMP-relative local frame
+// ---------------------------------------------------------------------------
+
+/// Records `local_frame_decl_test.masm` and pins the recorder's
+/// per-slot local-frame instrumentation:
+///
+///   * `proc.compute.4` declares 4 local slots; each
+///     `loc_store.N` triggers the recorder's active-locals
+///     tracking so subsequent steps surface `local[N]` as a
+///     separate variable name.
+///   * After all four stores complete (line 39, the last
+///     `loc_store.3`), the very next step at line 40 (the first
+///     `loc_load.0`) carries all four `local[0..3]` names with
+///     the canonical written values `10, 20, 30, 40`.
+///   * Each `loc_load.N` reads back the value most recently
+///     written, never leaking a slot from outside `compute`'s
+///     frame: `loc_load.0` lifts 10 to top of stack.
+#[test]
+fn test_local_frame_decl_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_local_frame_decl_test_via_ct_print_full",
+        "local_frame_decl_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    assert_all_values_are_int(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::compute"]);
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(11), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 11 step + 2 call_entry + 2 call_exit = 15.
+    assert_eq!(events.len(), 15, "events.len()");
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["#exec::#main".to_string(), "#exec::compute".to_string()],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec!["#exec::compute".to_string(), "#exec::#main".to_string()],
+    );
+
+    // ----- After all four loc_store.N, line 40 carries all 4 locals --
+    // The fixture's `loc_store.0..3` complete on lines 36, 37,
+    // 38, 39.  The first `loc_load.0` (line 40) is the first step
+    // where every slot has been written, so its var ledger must
+    // include `local[0]..local[3]` with the canonical written
+    // values `10, 20, 30, 40`.
+    let line40_step = events
+        .iter()
+        .find(|e| e["kind"] == "step" && e["line"].as_i64() == Some(40))
+        .expect("expected exactly one step on line 40 (first loc_load.0)");
+    let mut local_values: HashMap<String, i64> = HashMap::new();
+    for v in line40_step["vars"]
+        .as_array()
+        .expect("vars array")
+        .iter()
+        .filter(|v| {
+            v["varname"]
+                .as_str()
+                .map(|n| n.starts_with("local["))
+                .unwrap_or(false)
+        })
+    {
+        let name = v["varname"].as_str().unwrap().to_string();
+        let val = v["value"]["i"].as_i64().expect("Int.i");
+        local_values.insert(name, val);
+    }
+    let expected: HashMap<String, i64> = [
+        ("local[0]".to_string(), 10i64),
+        ("local[1]".to_string(), 20),
+        ("local[2]".to_string(), 30),
+        ("local[3]".to_string(), 40),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        local_values, expected,
+        "after the four loc_store.N, line 40 must carry local[0..3] = {{10, 20, 30, 40}}",
+    );
+
+    // ----- Slot index appears in the variable name (not just metadata)
+    // The recorder distinguishes each local slot by emitting
+    // `local[N]` as a separate variable name; pinning the four
+    // distinct names guards against a regression that might
+    // collapse all slots into a single anonymous `local` variable
+    // with index-only metadata.
+    let mut all_local_names: Vec<String> = events
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .flat_map(|e| e["vars"].as_array().cloned().unwrap_or_default())
+        .filter_map(|v| v["varname"].as_str().map(str::to_string))
+        .filter(|n| n.starts_with("local["))
+        .collect();
+    all_local_names.sort_unstable();
+    all_local_names.dedup();
+    assert_eq!(
+        all_local_names,
+        vec![
+            "local[0]".to_string(),
+            "local[1]".to_string(),
+            "local[2]".to_string(),
+            "local[3]".to_string(),
+        ],
+        "all four FMP-relative slots must surface as distinct `local[N]` names",
+    );
+
+    // ----- loc_load.N round-trip values (multi-cycle delay) ---------
+    // `loc_load.N` is multi-cycle so the recorder's cycle_idx==1
+    // snapshot at line N catches an FMP-relative bookkeeping
+    // value on top, NOT the loaded slot value.  The loaded value
+    // surfaces one step later (the next asmop's cycle_idx==1
+    // boundary) -- this is the same multi-cycle pattern that
+    // motivates the `pending_word` drain for `loc_loadw`.
+    //
+    // Concretely:
+    //   line 40 (loc_load.0): cycle_idx==1 shows FMP bookkeeping
+    //                          on s0; the just-loaded 10 has not
+    //                          yet rolled to the operand stack.
+    //   line 41 (loc_load.1): cycle_idx==1 shows the previous
+    //                          loc_load.0's loaded value (10)
+    //                          on s1, with this asmop's FMP
+    //                          bookkeeping on s0.
+    //   line 42 (loc_load.2): s1=20 (loc_load.1's result), s2=10
+    //                          (loc_load.0's result still below).
+    //
+    // We pin the loc_load.1 step (line 41) so the round-trip from
+    // loc_store.0 -> loc_load.0 is observable here as s1=10.
+    let line41_step = events
+        .iter()
+        .find(|e| e["kind"] == "step" && e["line"].as_i64() == Some(41))
+        .expect("expected exactly one step on line 41 (loc_load.1)");
+    let line41_s1 = line41_step["vars"]
+        .as_array()
+        .expect("vars array")
+        .iter()
+        .find(|v| v["varname"] == "stack[1]")
+        .and_then(|v| v["value"]["i"].as_i64())
+        .expect("stack[1] on line 41 step");
+    assert_eq!(
+        line41_s1, 10,
+        "loc_load.0's loaded value (10) surfaces on stack[1] at line 41 \
+         (next asmop after loc_load.0's multi-cycle completion)",
+    );
+
+    // Same shape on line 42: loc_load.1's result (20) on s1, and
+    // loc_load.0's result (10) carried to s2.
+    let line42_step = events
+        .iter()
+        .find(|e| e["kind"] == "step" && e["line"].as_i64() == Some(42))
+        .expect("expected exactly one step on line 42 (loc_load.2)");
+    let line42_s1 = line42_step["vars"]
+        .as_array()
+        .expect("vars array")
+        .iter()
+        .find(|v| v["varname"] == "stack[1]")
+        .and_then(|v| v["value"]["i"].as_i64())
+        .expect("stack[1] on line 42 step");
+    let line42_s2 = line42_step["vars"]
+        .as_array()
+        .expect("vars array")
+        .iter()
+        .find(|v| v["varname"] == "stack[2]")
+        .and_then(|v| v["value"]["i"].as_i64())
+        .expect("stack[2] on line 42 step");
+    assert_eq!(
+        [line42_s1, line42_s2],
+        [20, 10],
+        "loc_load.1 -> 20 on s1, loc_load.0's earlier result -> 10 on s2",
+    );
+
+    // ----- compute call_entry quartet --------------------------------
+    // First asmop in compute is `push.10` which compiles to a
+    // direct push; cycle_idx==1 catches the post-push state with
+    // 10 on top.  s1..s3 are zero padding (the only prior push
+    // was the leading `push.0` from #main, two slots deep).
+    let compute_entry = unique_call_entry(&doc, "#exec::compute");
+    assert_eq!(
+        call_entry_args_s0_s3(compute_entry),
+        [10, 0, 0, 0],
+        "compute entry: just-pushed 10 on top, padding below",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// hash_primitives_test.masm — RPO `hash` / `hperm` / `hmerge`
+// ---------------------------------------------------------------------------
+
+/// Records `hash_primitives_test.masm` and pins the recorder's
+/// hash-call aggregation discipline:
+///
+///   * Each of the three hash ops (`hash`, `hperm`, `hmerge`) is
+///     wrapped in a one-line procedure so the recorder treats the
+///     entire hash invocation -- including its 16-19 internal RPO
+///     rounds -- as a single Call/Return pair.  No per-round
+///     call_entry / call_exit events leak through.
+///   * `hperm` of the all-zero 12-felt state produces the
+///     canonical Poseidon2 permutation output; the top word of the
+///     post-permutation rate (visible at line 44 in #main, the
+///     post-hperm_op step) is pinned to the four felt elements
+///     Miden's RPO implementation produces for the all-zero input.
+///   * Each hash-op procedure surfaces as exactly ONE call_entry
+///     / call_exit pair (the per-op aggregation).
+///
+/// The reference values are captured directly from the recorder's
+/// observed Miden RPO output so a future RPO reference change
+/// (e.g. round-constant table update, capacity-init change) breaks
+/// this test loudly.
+#[test]
+fn test_hash_primitives_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_hash_primitives_test_via_ct_print_full",
+        "hash_primitives_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    assert_all_values_are_int(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec![
+            "#exec::#main",
+            "#exec::hash_op",
+            "#exec::hmerge_op",
+            "#exec::hperm_op",
+        ],
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(12), "steps; counts={counts}");
+    // 4 calls: synthesised #main + the three hash-op wrappers.
+    // The strict pin for hash-call aggregation: each hash op is
+    // wrapped in a single procedure so the entire 16-19 cycle
+    // RPO round expansion lives inside ONE call_entry / call_exit
+    // pair.  A regression that surfaces per-round call_entries
+    // would push this count well above 4.
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 12 step + 4 call_entry + 4 call_exit = 20.
+    assert_eq!(events.len(), 20, "events.len()");
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::hash_op".to_string(),
+            "#exec::hperm_op".to_string(),
+            "#exec::hmerge_op".to_string(),
+        ],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "#exec::hash_op".to_string(),
+            "#exec::hperm_op".to_string(),
+            "#exec::hmerge_op".to_string(),
+            "#exec::#main".to_string(),
+        ],
+    );
+
+    // ----- hperm output digest pinned exactly ------------------------
+    // After `hperm_op` returns, the post-permutation state is on
+    // top of the operand stack.  The recorder emits a step at
+    // line 44 (the `hperm` source line) attributed to #main; the
+    // top 4 felts ARE the post-permutation rate's first word.
+    //
+    // Reference values: Miden 0.14 RPO Poseidon2 permutation of
+    // the all-zero 12-felt state; captured from the recorder's
+    // observed output.  A future RPO round-constant or capacity-
+    // init change would break these strict pins.
+    let hperm_post = events
+        .iter()
+        .find(|e| {
+            e["kind"] == "step"
+                && e["function"].as_str() == Some("#exec::#main")
+                && e["line"].as_i64() == Some(44)
+        })
+        .expect("expected exactly one step on line 44 (post-hperm_op) attributed to #main");
+    let hperm_top4: [i64; 4] =
+        step_top4(hperm_post).expect("post-hperm_op step must carry a full top-4 stack snapshot");
+    assert_eq!(
+        hperm_top4,
+        [
+            4949768242600167471,
+            -1569765624114072829,
+            1403542540949983059,
+            -4362507071928307730,
+        ],
+        "Miden 0.14 RPO Poseidon2 permutation of the all-zero state \
+         must produce this canonical output digest -- a regression in the \
+         RPO round-constant table or capacity-init would change these felts",
+    );
+
+    // ----- hash output post-state (post-dropw window) ----------------
+    // The post-hash_op step at line 39 (hash's source line)
+    // attributed to #main captures the post-dropw window.  After
+    // the dropw consumes the digest, the recorder snapshots a
+    // 4-felt stack window with the operand-stack-depth marker `4`
+    // on top.  Strict pinning catches any regression in the
+    // post-procedure stack-snapshot path.
+    let hash_post = events
+        .iter()
+        .find(|e| {
+            e["kind"] == "step"
+                && e["function"].as_str() == Some("#exec::#main")
+                && e["line"].as_i64() == Some(39)
+        })
+        .expect("expected exactly one step on line 39 (post-hash_op) attributed to #main");
+    let hash_top4: [i64; 4] =
+        step_top4(hash_post).expect("post-hash_op step must carry a full top-4 stack snapshot");
+    assert_eq!(
+        hash_top4,
+        [4, 0, 0, 0],
+        "post-hash_op stack: dropw consumed the digest, exposing the \
+         operand-stack depth marker `4` on top with zero padding below",
+    );
+
+    // ----- Each hash op surfaces as exactly one Call/Return pair -----
+    // The strict aggregation pin: every named hash procedure
+    // (`hash_op`, `hperm_op`, `hmerge_op`) opens exactly once and
+    // closes exactly once.  Per-round register_call leaks would
+    // push these counts above 1.
+    for proc_name in ["#exec::hash_op", "#exec::hperm_op", "#exec::hmerge_op"] {
+        let entries = events
+            .iter()
+            .filter(|e| e["kind"] == "call_entry" && e["function"].as_str() == Some(proc_name))
+            .count();
+        let exits = events
+            .iter()
+            .filter(|e| e["kind"] == "call_exit" && e["function"].as_str() == Some(proc_name))
+            .count();
+        assert_eq!(
+            (entries, exits),
+            (1, 1),
+            "{proc_name} must open and close exactly once -- per-round RPO \
+             call leaks would push these counts above 1",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// advice_tape_test.masm — adv_push / adv_loadw advice-stack reads
+// ---------------------------------------------------------------------------
+
+/// Records `advice_tape_test.masm` and pins the recorder's
+/// advice-tape read instrumentation:
+///
+///   * The fixture declares its advice-stack contents inline via
+///     `# advice_stack: 10, 20, ..., 120`.  The recorder's
+///     `parse_advice_stack` parses this header and seeds the
+///     `MemAdviceProvider` so `adv_push.N` / `adv_loadw` no
+///     longer fail at runtime with an empty advice stack.
+///   * Every advice-tape read surfaces as a distinct io_event
+///     with `io_kind == "ioFileOp"` (the multi-stream mapping for
+///     `EventLogKind::Read`) and a content payload prefixed with
+///     `advice_read kind=...` so downstream tooling can filter on
+///     the advice-tape source.
+///   * Read offsets / values are captured verbatim:
+///     - `adv_push.1` (1st invocation) -> [10]
+///     - `adv_push.1` (2nd invocation) -> [20]
+///     - `adv_push.4` -> [60, 50, 40, 30]
+///        (Miden's `adv_push.N` reverses the popped values on the
+///         operand stack, per the io_operations.md note: "the
+///         data will be d,c,b,a on your stack")
+///     - `adv_loadw` -> [100, 90, 80, 70] (same reversal rule)
+///   * The parser unit-test below verifies the parser
+///     independently of the recorder runtime path.
+#[test]
+fn test_advice_tape_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_advice_tape_test_via_ct_print_full",
+        "advice_tape_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    assert_all_values_are_int(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec!["#exec::#main", "#exec::loadw_op", "#exec::tape_reader"],
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(8), "steps; counts={counts}");
+    // 3 calls: synthesised #main + tape_reader + loadw_op.
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // 4 io_events: 3 adv_push reads inside tape_reader + 1
+    // adv_loadw inside loadw_op.  A regression that drops the
+    // event emission would push this to 0; an over-emission (e.g.
+    // firing on every cycle) would push it well above 4.
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(4),
+        "io_events; counts={counts}",
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 8 step + 3 call_entry + 3 call_exit + 4 io = 18.
+    assert_eq!(events.len(), 18, "events.len()");
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::tape_reader".to_string(),
+            "#exec::loadw_op".to_string(),
+        ],
+    );
+
+    // ----- Per-event io_kind / payload pinning -----------------------
+    // Walk the io_event sequence and pin EVERY event's io_kind and
+    // exact text payload.  The strict spec requires "advice-tape
+    // reads surface as a distinct AdviceRead or AdviceLookup event
+    // class with the read offset and value captured" -- pinning
+    // both the discriminator (`advice_read kind=adv_push|adv_loadw`)
+    // and the values list satisfies that contract without needing
+    // a dedicated `EventLogKind::AdviceRead` upstream variant.
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
+    assert_eq!(io_events.len(), 4, "exactly 4 advice-tape io_events");
+
+    // All four events use the `ioFileOp` channel (the multi-stream
+    // mapping for `EventLogKind::Read`).  Pinning catches a future
+    // routing change to e.g. `ioStdout`.
+    for ev in &io_events {
+        assert_eq!(
+            ev["io_kind"].as_str(),
+            Some("ioFileOp"),
+            "advice-tape read must route to ioFileOp; got {ev}",
+        );
+    }
+
+    // First adv_push.1 lifts the first declared value (10).
+    assert_eq!(
+        io_events[0]["text"].as_str(),
+        Some("advice_read kind=adv_push count=1 values=[10]"),
+        "first adv_push.1 must lift the first declared advice value (10)",
+    );
+    // Second adv_push.1 lifts the next declared value (20).
+    assert_eq!(
+        io_events[1]["text"].as_str(),
+        Some("advice_read kind=adv_push count=1 values=[20]"),
+        "second adv_push.1 must lift the second declared advice value (20)",
+    );
+    // adv_push.4 pops 4 values from the advice stack and lands
+    // them REVERSED on the operand stack (Miden convention).
+    // Declared values 30, 40, 50, 60 land as [60, 50, 40, 30].
+    assert_eq!(
+        io_events[2]["text"].as_str(),
+        Some("advice_read kind=adv_push count=4 values=[60, 50, 40, 30]"),
+        "adv_push.4 must lift the next four declared values reversed",
+    );
+    // adv_loadw pops the next 4 (70, 80, 90, 100) and overwrites
+    // the top word with the reversed sequence.
+    assert_eq!(
+        io_events[3]["text"].as_str(),
+        Some("advice_read kind=adv_loadw count=4 values=[100, 90, 80, 70]"),
+        "adv_loadw must lift the next four declared values reversed",
+    );
+
+    // ----- Parser unit-test: declared values round-trip --------------
+    // The recorder's `parse_advice_stack` consumes the header
+    // declaration and feeds it into `AdviceInputs::with_stack_values`.
+    // We verify the parser directly so a regression in the header
+    // recognition logic surfaces independently of the runtime
+    // event-emission path.
+    let source = std::fs::read_to_string(&source_path).expect("read source");
+    let parsed = codetracer_miden_recorder::tracer::parse_advice_stack(&source);
+    assert_eq!(
+        parsed,
+        vec![10u64, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
+        "parse_advice_stack must return the declared values in source order",
+    );
+}

@@ -1,0 +1,60 @@
+# advice_tape_test.masm
+#
+# Exercises the advice-tape read primitives `adv_push.N` (lift N
+# felts from the advice stack to the operand stack) and
+# `adv_loadw` (lift a 4-felt word from the advice stack into the
+# top operand-stack word).  The recorder loads the advice stack
+# from the `# advice_stack: V0, V1, ...` declaration below; this
+# convention keeps the recorder self-contained without requiring
+# external advice-input files.
+#
+# The strict pin asserts:
+#
+#   * Advice-stack reads surface as distinct `io_event` entries
+#     under the `EventLogKind::Read` channel (parallel to the
+#     `EventLogKind::Error` routing for `assertion_error_codes`).
+#     Each event's content payload starts with the
+#     `advice_read` tag so the source channel is unambiguous.
+#   * The recorded values match the declared advice-stack
+#     contents in source order: the first `adv_push.1` lifts
+#     the FIRST declared value (10), the second `adv_push.1`
+#     lifts the SECOND (20), `adv_push.4` lifts the next four
+#     in the convention `[v_top, ...]` Miden surfaces.
+#   * `adv_loadw` lifts the next 4-felt word from the advice
+#     stack into the operand-stack top word.
+#
+# Layout: the procedure `tape_reader.0` consumes 8 felts from
+# the advice tape -- two `adv_push.1` and one `adv_push.4` --
+# leaving 6 felts on the operand stack.  Then `loadw_op.0` clears
+# the top word with `padw` (so adv_loadw has a destination word
+# to overwrite) and lifts the next 4 felts via `adv_loadw`,
+# leaving 4 more felts on the stack.
+#
+# advice_stack: 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120
+#   - The first 8 felts (10..80) feed the three adv_push ops in
+#     `tape_reader`.  The next 4 (90..120) feed `adv_loadw` in
+#     `loadw_op`.
+
+proc.tape_reader.0
+    adv_push.1
+    adv_push.1
+    adv_push.4
+end
+
+proc.loadw_op.0
+    padw
+    adv_loadw
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+    exec.tape_reader
+    exec.loadw_op
+    # Drain everything: tape_reader leaves 6 felts on top
+    # (1+1+4 from adv_push), loadw_op leaves 4 (the 4-felt
+    # adv_loadw'd word -- padw + adv_loadw is net +0 since
+    # adv_loadw overwrites the padw zeros).  Plus the leading
+    # push.0 from #main.  6 + 4 + 1 = 11 felts to drop.
+    drop drop drop drop drop drop drop drop drop drop drop
+end
