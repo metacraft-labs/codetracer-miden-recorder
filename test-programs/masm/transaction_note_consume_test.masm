@@ -1,0 +1,124 @@
+# transaction_note_consume_test.masm
+#
+# Simulates the canonical Miden transaction note-consumption
+# pattern (receive -> unwrap -> store) by composing two M10
+# primitives that already have first-class recorder support:
+#
+#   * Advice-tape reads (`adv_push.1`) -- the in-VM analogue of
+#     fetching a note's payload from the host (in a real Miden
+#     transaction the note inputs and assets are staged on the
+#     advice provider before the kernel's note-processing
+#     procedures lift them onto the operand stack).
+#   * `mem_store` writes against a fixed base address -- the
+#     in-VM analogue of writing the unwrapped (key, value)
+#     pair into account storage slots (cf. the parallel
+#     `transaction_account_storage_test` fixture which pins
+#     the same `mem_store` shape for the storage-write path).
+#
+# Wire format on the advice tape (3 felts per simulated note):
+#
+#   note_inputs_n[0] = note tag (0xCAFE)
+#   note_inputs_n[1] = storage key (slot index)
+#   note_inputs_n[2] = stored value
+#
+# Three notes are staged so the recorder pins THREE distinct
+# Call/Return pairs per note-processing procedure (matching
+# the per-note fan-out the real `consume_input_notes` kernel
+# loop would produce against three input notes).
+#
+# Procedure conventions (mirroring `transaction_account_storage_test`):
+#
+#   `note_recv.0`
+#       Stack convention: [...] -> [value, key, tag, ...].
+#       Lifts ONE note's three felts off the advice tape via
+#       three `adv_push.1` ops.  The first popped (note tag)
+#       lands at depth 2; the last popped (value) lands on
+#       top -- standard Miden semantics for repeated
+#       single-felt advice pushes.
+#
+#   `note_unwrap.0`
+#       Stack convention: [value, key, tag, ...] -> [key, value, ...].
+#       Drops the tag (already validated by the receive layer
+#       in the real kernel; here we just discard it) and
+#       re-orders the remaining two felts into [key, value, ...]
+#       -- the layout `note_store` expects.
+#
+#   `note_store.0`
+#       Stack convention: [key, value, ...] -> [...].
+#       Adds the storage base offset (200) to `key` to produce
+#       the storage address, then writes `value` to that
+#       address via `mem_store`.  Mirrors the
+#       `account_set_item` shape from
+#       `transaction_account_storage_test` but with a distinct
+#       base (200 vs 100) so a future cross-fixture leak would
+#       surface as a clear address mismatch.
+#
+# Driver:
+#   For each of three staged notes, invoke the receive ->
+#   unwrap -> store sequence.  After all three notes have been
+#   consumed, mem[200..202] holds the three stored values.
+#
+# Strict pin (matching test):
+#   * Function table: #main + 3 helper procedures.
+#   * 1 (#main) + 3*3 (per-note recv/unwrap/store) = 10 calls.
+#   * 9 io_events for the 9 `adv_push.1` reads (3 per note,
+#     all routed through the `ioFileOp` channel and tagged
+#     with the `advice_read kind=adv_push count=1` payload).
+#   * call_entry args at each `note_store` invocation pin the
+#     (key, value) pair the note unwrapped (the store layer is
+#     the reproducibility boundary for the consumed payload).
+#   * Static call-graph parser classifies all three helper
+#     invocations as `CallKind::Exec`.
+#
+# advice_stack: 51966, 0, 42, 51966, 1, 99, 51966, 2, 7
+#   - 51966 == 0xCAFE (the note-tag sentinel, repeated per note).
+#   - Notes: (key=0, value=42), (key=1, value=99), (key=2, value=7).
+
+proc.note_recv.0
+    # Lift the next 3 felts off the advice tape (one note's
+    # payload).  Three `adv_push.1` ops -- not a single
+    # `adv_push.3` -- so each lift surfaces as its own io_event
+    # and the strict pin can match them individually.
+    adv_push.1      # tag    -> stack[0]=tag
+    adv_push.1      # key    -> stack[0]=key,  stack[1]=tag
+    adv_push.1      # value  -> stack[0]=value, stack[1]=key, stack[2]=tag
+end
+
+proc.note_unwrap.0
+    # Stack on entry: [value, key, tag, ...].
+    # Stack on exit:  [key,   value, ...].
+    swap            # [key,   value, tag, ...]
+    movup.2         # [tag,   key,   value, ...]
+    drop            # [key,   value, ...]
+end
+
+proc.note_store.0
+    # Stack on entry: [key, value, ...].
+    # mem_store consumes [addr, val, ...] -> [...] so we add
+    # the storage base offset to `key` to produce the address.
+    add.200         # [addr, value, ...]
+    mem_store       # [...]
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+
+    # ===== Note 1: (key=0, value=42) =====
+    exec.note_recv
+    exec.note_unwrap
+    exec.note_store
+
+    # ===== Note 2: (key=1, value=99) =====
+    exec.note_recv
+    exec.note_unwrap
+    exec.note_store
+
+    # ===== Note 3: (key=2, value=7) =====
+    exec.note_recv
+    exec.note_unwrap
+    exec.note_store
+
+    # Drain the leading push.0.
+    drop
+end

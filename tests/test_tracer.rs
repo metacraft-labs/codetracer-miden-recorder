@@ -5562,3 +5562,278 @@ fn test_cross_context_call_test_via_ct_print_full() {
         "begin should classify `call.callee` as CallKind::Call",
     );
 }
+
+// ---------------------------------------------------------------------------
+// transaction_note_consume_test.masm -- canonical Miden tx note consumption
+// ---------------------------------------------------------------------------
+
+/// Records `transaction_note_consume_test.masm` and pins the
+/// recorder's behaviour for the canonical Miden transaction
+/// note-consumption pattern (receive -> unwrap -> store) composed
+/// from advice-tape reads + `mem_store` writes.  The fixture
+/// processes THREE staged notes (per-note triple
+/// `[tag=0xCAFE, key, value]` on the advice tape) so the recorder
+/// pins three distinct Call/Return cycles per helper procedure.
+///
+/// Strict pin:
+///   * Function table: `#main`, `note_recv`, `note_unwrap`,
+///     `note_store` (4 entries; the unwrap/store split lets the
+///     recorder pin the (key, value) pair at the storage
+///     reproducibility boundary independently of the tape-lift
+///     boundary).
+///   * 1 (#main) + 3 * 3 (per-note recv/unwrap/store) = 10 calls.
+///   * 9 io_events for the 9 `adv_push.1` reads (3 per note,
+///     all routed through the `ioFileOp` channel and tagged with
+///     `advice_read kind=adv_push count=1 values=[...]`).
+///   * Per-`note_store` call_entry args pin the (key, value)
+///     pair the note unwrapped: the s0 felt is always 200 (the
+///     just-pushed storage-base offset constant from `add.200`);
+///     s1 is `key` (slot index); s2 is `value` (the felt that
+///     `mem_store` will write to address `s0 + s1`).
+///   * Static call-graph parser classifies all three helper
+///     invocations as `CallKind::Exec`.
+///   * Advice-stack parser round-trips the declared 9-felt tape.
+#[test]
+fn test_transaction_note_consume_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_transaction_note_consume_test_via_ct_print_full",
+        "transaction_note_consume_test.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    assert_all_values_are_int(&doc);
+
+    // ----- Function table ---------------------------------------------
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec![
+            "#exec::#main",
+            "#exec::note_recv",
+            "#exec::note_store",
+            "#exec::note_unwrap",
+        ],
+    );
+
+    // ----- Counts -----------------------------------------------------
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(27), "steps; counts={counts}");
+    // 1 (#main) + 3 * 3 (per-note recv/unwrap/store) = 10 calls.
+    assert_eq!(counts["calls"].as_u64(), Some(10), "calls; counts={counts}");
+    // 9 io_events: 3 `adv_push.1` reads per note, 3 notes = 9.  A
+    // regression that drops the event emission would push this to
+    // 0; an over-emission (e.g. firing on every cycle) would push
+    // it well above 9.
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(9),
+        "io_events; counts={counts}",
+    );
+
+    // ----- Total event tally ------------------------------------------
+    // 27 step + 10 call_entry + 10 call_exit + 9 io = 56.
+    let events = doc["events"].as_array().expect("events array");
+    assert_eq!(events.len(), 56, "events.len()");
+
+    // ----- Per-note call/exit interleave ------------------------------
+    // The driver calls receive -> unwrap -> store, three times.
+    // Each helper opens and closes before the next is entered, so
+    // the call_entry and call_exit sequences are perfectly aligned
+    // (no nested helpers).
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::note_recv".to_string(),
+            "#exec::note_unwrap".to_string(),
+            "#exec::note_store".to_string(),
+            "#exec::note_recv".to_string(),
+            "#exec::note_unwrap".to_string(),
+            "#exec::note_store".to_string(),
+            "#exec::note_recv".to_string(),
+            "#exec::note_unwrap".to_string(),
+            "#exec::note_store".to_string(),
+        ],
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "#exec::note_recv".to_string(),
+            "#exec::note_unwrap".to_string(),
+            "#exec::note_store".to_string(),
+            "#exec::note_recv".to_string(),
+            "#exec::note_unwrap".to_string(),
+            "#exec::note_store".to_string(),
+            "#exec::note_recv".to_string(),
+            "#exec::note_unwrap".to_string(),
+            "#exec::note_store".to_string(),
+            "#exec::#main".to_string(),
+        ],
+    );
+
+    // ----- Per-event io_kind / payload pinning ------------------------
+    // Walk the io_event sequence and pin EVERY event's io_kind and
+    // exact text payload.  The note's per-note triple
+    // [tag=51966 (=0xCAFE), key, value] surfaces as three
+    // consecutive `adv_push.1` reads, repeated for the three
+    // notes.  Pinning both the discriminator (`advice_read
+    // kind=adv_push count=1`) and the value list catches
+    // (a) a future re-routing of advice reads off the `ioFileOp`
+    // channel and (b) any reordering of the per-note triple.
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
+    assert_eq!(io_events.len(), 9, "exactly 9 advice-tape io_events");
+
+    for ev in &io_events {
+        assert_eq!(
+            ev["io_kind"].as_str(),
+            Some("ioFileOp"),
+            "advice-tape read must route to ioFileOp; got {ev}",
+        );
+    }
+
+    let expected_io_payloads: [&str; 9] = [
+        // Note 1: tag=0xCAFE, key=0, value=42
+        "advice_read kind=adv_push count=1 values=[51966]",
+        "advice_read kind=adv_push count=1 values=[0]",
+        "advice_read kind=adv_push count=1 values=[42]",
+        // Note 2: tag=0xCAFE, key=1, value=99
+        "advice_read kind=adv_push count=1 values=[51966]",
+        "advice_read kind=adv_push count=1 values=[1]",
+        "advice_read kind=adv_push count=1 values=[99]",
+        // Note 3: tag=0xCAFE, key=2, value=7
+        "advice_read kind=adv_push count=1 values=[51966]",
+        "advice_read kind=adv_push count=1 values=[2]",
+        "advice_read kind=adv_push count=1 values=[7]",
+    ];
+    for (i, expected) in expected_io_payloads.iter().enumerate() {
+        assert_eq!(
+            io_events[i]["text"].as_str(),
+            Some(*expected),
+            "io_event[{i}] payload mismatch",
+        );
+    }
+
+    // ----- Per-call call_entry args (key + value capture at store) ----
+    // Walk the events in order and pin each helper's call_entry
+    // s0..s3 quartet.  `note_store` is the reproducibility
+    // boundary for the consumed note payload: its (key, value)
+    // pair is what `mem_store` writes to account storage.
+    //
+    // For each procedure the snapshot is taken AFTER the first
+    // asmop of the called procedure has executed (this matches
+    // the existing convention exercised by
+    // `transaction_account_storage_test`'s `add.100` => s0=100
+    // pin).  Concretely:
+    //   * `note_recv`'s first asmop is `adv_push.1` (the tag),
+    //     so s0 carries the lifted tag (51966 = 0xCAFE).
+    //   * `note_unwrap`'s first asmop is `swap`, so the entry
+    //     stack `[value, key, tag, ...]` is snapshotted as
+    //     `[key, value, tag, ...]`.
+    //   * `note_store`'s first asmop is `add.200`, which Miden
+    //     internally lowers to `push.200; add` — so the
+    //     snapshot is taken after the `push.200` and s0=200,
+    //     s1=key, s2=value (the `add` step that consumes
+    //     [200, key] and pushes [key+200] runs LATER, inside
+    //     the procedure).
+    let call_entries: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry" && e["function"].as_str() != Some("#exec::#main"))
+        .collect();
+    assert_eq!(
+        call_entries.len(),
+        9,
+        "must have 9 user-procedure call_entry events",
+    );
+
+    // ---- note_recv invocations: s0 carries the lifted note tag ----
+    // (all three notes use the same sentinel tag 0xCAFE).
+    for note_idx in 0..3usize {
+        assert_eq!(
+            call_entry_args_s0_s3(call_entries[note_idx * 3]),
+            [51966, 0, 0, 0],
+            "note_recv #{} entry: s0=51966 (=0xCAFE) lifted from advice tape",
+            note_idx + 1,
+        );
+    }
+
+    // ---- note_unwrap invocations: post-`swap` snapshot.
+    // Entry stack pre-swap is `[value, key, tag, ...]`;
+    // post-swap (the snapshot) is `[key, value, tag, ...]`.
+    let expected_unwrap_args: [[i64; 4]; 3] = [
+        // Note 1: key=0, value=42, tag=51966
+        [0, 42, 51966, 0],
+        // Note 2: key=1, value=99, tag=51966
+        [1, 99, 51966, 0],
+        // Note 3: key=2, value=7, tag=51966
+        [2, 7, 51966, 0],
+    ];
+    for (note_idx, expected) in expected_unwrap_args.iter().enumerate() {
+        assert_eq!(
+            call_entry_args_s0_s3(call_entries[note_idx * 3 + 1]),
+            *expected,
+            "note_unwrap #{} entry: post-swap layout [key, value, tag, ...]",
+            note_idx + 1,
+        );
+    }
+
+    // ---- note_store invocations: post-`push.200` snapshot.
+    // s0=200 (storage base just pushed); s1=key; s2=value.
+    let expected_store_args: [[i64; 4]; 3] = [
+        [200, 0, 42, 0], // Note 1: key=0, value=42
+        [200, 1, 99, 0], // Note 2: key=1, value=99
+        [200, 2, 7, 0],  // Note 3: key=2, value=7
+    ];
+    for (note_idx, expected) in expected_store_args.iter().enumerate() {
+        assert_eq!(
+            call_entry_args_s0_s3(call_entries[note_idx * 3 + 2]),
+            *expected,
+            "note_store #{} entry: s0=200 (storage base), s1=key, s2=value",
+            note_idx + 1,
+        );
+    }
+
+    // ----- Static call-kind detection: all helpers are Exec -----------
+    let source = std::fs::read_to_string(&source_path).expect("read source");
+    let kinds = codetracer_miden_recorder::tracer::parse_call_kinds(&source);
+    use codetracer_miden_recorder::tracer::CallKind;
+    let main_callees = kinds.get("#main").expect("#main in graph");
+    assert_eq!(
+        main_callees.get("note_recv"),
+        Some(&CallKind::Exec),
+        "exec.note_recv must classify as Exec (not Call/SysCall)",
+    );
+    assert_eq!(
+        main_callees.get("note_unwrap"),
+        Some(&CallKind::Exec),
+        "exec.note_unwrap must classify as Exec",
+    );
+    assert_eq!(
+        main_callees.get("note_store"),
+        Some(&CallKind::Exec),
+        "exec.note_store must classify as Exec",
+    );
+
+    // ----- Advice-stack parser round-trip -----------------------------
+    // The recorder's `parse_advice_stack` consumes the header
+    // declaration and feeds it into `AdviceInputs::with_stack_values`.
+    // We verify the parser directly so a regression in the header
+    // recognition logic surfaces independently of the runtime
+    // event-emission path.
+    let parsed = codetracer_miden_recorder::tracer::parse_advice_stack(&source);
+    assert_eq!(
+        parsed,
+        vec![51966u64, 0, 42, 51966, 1, 99, 51966, 2, 7],
+        "parse_advice_stack must return the declared 9-felt tape \
+         (3 notes * 3 felts per note)",
+    );
+}
