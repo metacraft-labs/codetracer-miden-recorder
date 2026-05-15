@@ -1539,9 +1539,13 @@ fn test_memory_ops_test_via_ct_print_full() {
         observed_call_sequence(&doc),
         vec!["#exec::mem_reader".to_string(), "#exec::#main".to_string()],
     );
+    // call_exit ordering follows call-entry key order after upstream
+    // codetracer-trace-format-nim eec665b ("CTFS-M-CallKeyOrder:
+    // allocate call_key at call entry"): exits are emitted in the order
+    // of their entry keys rather than inverse-LIFO.
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["#exec::#main".to_string(), "#exec::mem_reader".to_string()],
+        vec!["#exec::mem_reader".to_string(), "#exec::#main".to_string()],
     );
 
     // ----- mem_writer effect: each push.N appears as stack[0]=N ------
