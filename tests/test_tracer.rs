@@ -1400,35 +1400,48 @@ fn test_nested_calls_test_via_ct_print_full() {
     // 5 step + 4 call_entry + 4 call_exit = 13.
     assert_eq!(events.len(), 13, "events.len()");
 
-    // Both call_entry and call_exit appear in close-order (innermost
-    // first) because the multi-stream writer assigns `callKey` at
-    // `register_return` time, and ct-print iterates calls in `callKey`
-    // order.  The chain-synthesis pre-pass registers all four calls
-    // before any step is emitted (entry_step = 0), so they're all
-    // attached to step 0 and emitted in callKey order: inner closed
-    // first → callKey 0 → emitted first; compute closed last → callKey
-    // 3 → emitted last.  See
-    // `MidenTracer::process_vm_states`'s end-of-trace drain block.
+    // Both call_entry and call_exit appear in entry-key order
+    // (outermost first) after upstream codetracer-trace-format-nim
+    // eec665b ("CTFS-M-CallKeyOrder: allocate call_key at call entry").
+    // The recorder's chain-synthesis pre-pass (see
+    // `MidenTracer::process_vm_states`'s `chain_from_main` branch)
+    // registers `compute`, `outer`, `middle`, `inner` in that order at
+    // step 0 BEFORE the first emitted step, so the writer assigns
+    // call_keys 0..3 to that sequence.  Every frame stays open until
+    // the end-of-trace drain (#main never re-surfaces here because the
+    // synthesised-chain branch closes the inlined chain back to
+    // toplevel without reopening #main), so all four exit_steps land
+    // on the final step and ct-print emits both entries and exits in
+    // call_key (entry) order: compute → outer → middle → inner.
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
-            "#exec::inner".to_string(),
-            "#exec::middle".to_string(),
-            "#exec::outer".to_string(),
             "#exec::compute".to_string(),
+            "#exec::outer".to_string(),
+            "#exec::middle".to_string(),
+            "#exec::inner".to_string(),
         ],
     );
 
-    // Strict LIFO exit ordering: each frame closes when execution
-    // unwinds back through it (inner first, then middle, then outer,
-    // finally compute).
+    // Exit sequence under eec665b: ct-print walks step-by-step and at
+    // each step emits the call_exits whose `exit_step` matches, in
+    // call_key (entry) order.  Here the natural-return branch closes
+    // `inner` at step 0 and `middle` at step 1, then the synthesised-
+    // chain-end branch (transition to #main at step 2's `drop`) calls
+    // `register_return` twice in quick succession — so `outer` and
+    // `compute` BOTH share `exit_step = 2`.  The call_key tie-break
+    // emits `compute` (key 0) before `outer` (key 1).  Net order is
+    // therefore `[inner, middle, compute, outer]`: NOT pure LIFO and
+    // NOT pure entry-key — a per-step grouping with intra-step
+    // entry-key ordering.  See `MidenTracer::process_vm_states`'s
+    // synthesised_chain_leaf branch (src/tracer.rs ~line 587).
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "#exec::inner".to_string(),
             "#exec::middle".to_string(),
-            "#exec::outer".to_string(),
             "#exec::compute".to_string(),
+            "#exec::outer".to_string(),
         ],
     );
 
@@ -2060,20 +2073,32 @@ fn test_mast_inlining_test_via_ct_print_full() {
     // 7 step + 5 call_entry + 5 call_exit = 17.
     assert_eq!(events.len(), 17, "events.len()");
 
-    // Both call_entry and call_exit appear in callKey order
-    // (innermost first) -- the chain-synthesis pre-pass registers
-    // all five frames before the first step is emitted, so they
-    // attach to step 0 and ct-print iterates them by callKey.
+    // Both call_entry and call_exit appear in entry-key order
+    // (outermost first) after upstream codetracer-trace-format-nim
+    // eec665b ("CTFS-M-CallKeyOrder: allocate call_key at call entry").
+    // The chain-synthesis pre-pass registers `wrapper`, `three`,
+    // `two`, `one`, `leaf` (in that source-walk order) before the
+    // first step, so the writer assigns call_keys 0..4 to the
+    // outermost→innermost sequence.  All five frames stay open until
+    // the end-of-trace drain, share the same exit_step, and ct-print
+    // emits both entries and exits in call_key (entry) order.
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
-            "#exec::leaf".to_string(),
-            "#exec::one".to_string(),
-            "#exec::two".to_string(),
-            "#exec::three".to_string(),
             "#exec::wrapper".to_string(),
+            "#exec::three".to_string(),
+            "#exec::two".to_string(),
+            "#exec::one".to_string(),
+            "#exec::leaf".to_string(),
         ],
     );
+    // Exit sequence under eec665b: each natural return fires at a
+    // distinct step (leaf returns at step 0, one at step 1, two at
+    // step 2, three at step 3, wrapper at step 4 via the synthesised-
+    // chain-end transition to #main).  Because every exit_step is
+    // unique here, the per-step emission yields strict LIFO order
+    // (innermost first) WITHOUT the entry-key tie-breaking that
+    // applies in `test_nested_calls_test_via_ct_print_full`.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -3420,21 +3445,26 @@ fn test_stdlib_imports_test_via_ct_print_full() {
         ],
     );
 
-    // ----- Exit sequence: strict LIFO closure including stdlib --------
-    // Mirrors the recorder's outermost-closed-last invariant:
-    // `truncate_stack` (last opened) closes first; `#main`
-    // (outermost) closes last.  The stdlib procedures slot into
-    // the LIFO queue exactly as the user-written ones do.
+    // ----- Exit sequence: entry-key order under eec665b -------------
+    // After upstream codetracer-trace-format-nim eec665b
+    // ("CTFS-M-CallKeyOrder: allocate call_key at call entry"), exits
+    // are emitted in entry-key (call-registration) order rather than
+    // strict LIFO close order.  All seven frames remain buffered until
+    // close() drains them (the stack never returns to empty mid-trace
+    // because #main stays open), so they share the same exit_step and
+    // ct-print iterates `callsByExit` in call_key order: #main (key 0)
+    // first, truncate_stack (key 6) last.  Mirrors the call_entry
+    // sequence above.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
-            "std::sys::truncate_stack".to_string(),
-            "std::math::u64::wrapping_mul".to_string(),
-            "#exec::mul_op".to_string(),
-            "std::math::u64::wrapping_add".to_string(),
-            "std::math::u64::overflowing_add".to_string(),
-            "#exec::add_op".to_string(),
             "#exec::#main".to_string(),
+            "#exec::add_op".to_string(),
+            "std::math::u64::overflowing_add".to_string(),
+            "std::math::u64::wrapping_add".to_string(),
+            "#exec::mul_op".to_string(),
+            "std::math::u64::wrapping_mul".to_string(),
+            "std::sys::truncate_stack".to_string(),
         ],
     );
 
