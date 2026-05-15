@@ -1,0 +1,140 @@
+# merkle_tree_test.masm
+#
+# Exercises Miden's native Merkle-tree primitives:
+#
+#   * `mtree_get`    — read leaf V at depth d, index i from the
+#                      tree rooted at R.  Stack convention
+#                      (from top): `[d, i, R[3], R[2], R[1], R[0], ...]`
+#                      -> `[V[3], V[2], V[1], V[0], R[3], R[2], R[1], R[0], ...]`.
+#                      9 VM cycles internally.
+#   * `mtree_set`    — write a new leaf value V_new at depth d,
+#                      index i in the tree rooted at R_old.
+#                      Stack convention (from top):
+#                      `[d, i, R_old[3..0], V_new[3..0], ...]`
+#                      -> `[V_old[3..0], R_new[3..0], ...]`.
+#                      29 VM cycles internally.
+#   * `mtree_verify` — verify that node V opens at depth d,
+#                      index i in the tree rooted at R.
+#                      Stack convention (from top):
+#                      `[V[3], V[2], V[1], V[0], d, i, R[3..0], ...]`
+#                      -- consumes inputs in place; panics on
+#                      mismatch.  The op is the raw `MpVerify`
+#                      VM op, which leaves the inputs on stack.
+#
+# The recorder's `parse_merkle_trees` parser materialises every
+# 4-leaf tree declared via `# merkle_tree:` into a
+# `MerkleTree`, extends the advice provider's `MerkleStore`
+# with the tree's inner nodes, and the runtime mtree ops
+# resolve against that store.  Two trees are declared so
+# `mtree_set` can promote a leaf-update result whose new root
+# matches the second tree's RPO root (pre-computed).
+#
+# Tree A (4 leaves, depth 2):
+#   leaf[0] = [1, 0, 0, 0]
+#   leaf[1] = [2, 0, 0, 0]
+#   leaf[2] = [3, 0, 0, 0]
+#   leaf[3] = [4, 0, 0, 0]
+#
+# Tree B (same as A but leaf[3] -> [9, 0, 0, 0]):
+#   leaf[3] = [9, 0, 0, 0]
+#
+# Roots are pinned in the matching test via
+# `tracer::merkle_tree_root_felts`.
+#
+# Each Merkle op is wrapped in a one-line procedure so the
+# recorder treats each invocation as a single Call/Return
+# pair.  The wrapper does no pre/post-stack manipulation —
+# `begin` sets up the stack for each call.
+#
+# merkle_tree: 1 0 0 0 ; 2 0 0 0 ; 3 0 0 0 ; 4 0 0 0
+# merkle_tree: 1 0 0 0 ; 2 0 0 0 ; 3 0 0 0 ; 9 0 0 0
+# advice_stack: 0
+
+proc.mtree_get_op.0
+    mtree_get
+end
+
+proc.mtree_verify_op.0
+    mtree_verify
+end
+
+proc.mtree_set_op.0
+    mtree_set
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+
+    # ===================================================
+    # 1. mtree_get: fetch leaf[1] = [2, 0, 0, 0]
+    # ===================================================
+    # Layout (from top): [d=2, i=1, R_A[3..0], ...]
+    # Push R_A[0..3] then i then d so the stack top is d.
+    push.0x6696202345be0a88    # R_A[0]
+    push.0x9514b040776e6417    # R_A[1]
+    push.0x080a78289af10043    # R_A[2]
+    push.0x34054b3ff32fd689    # R_A[3]
+    push.1                      # i = 1
+    push.2                      # d = 2
+    exec.mtree_get_op
+    # Post-mtree_get layout (from top):
+    #   [V[3]=0, V[2]=0, V[1]=0, V[0]=2, R_A[3..0], ...]
+    # Drop V (4) and R_A (4) so the stack returns to [push.0, ...].
+    dropw dropw
+
+    # ===================================================
+    # 2. mtree_verify: verify leaf[2] = [3, 0, 0, 0]
+    # ===================================================
+    # Layout (from top): [V[3], V[2], V[1], V[0], d=2, i=2, R_A[3..0], ...]
+    push.0x6696202345be0a88    # R_A[0]
+    push.0x9514b040776e6417    # R_A[1]
+    push.0x080a78289af10043    # R_A[2]
+    push.0x34054b3ff32fd689    # R_A[3]
+    push.2                      # i = 2
+    push.2                      # d = 2
+    push.3                      # V[0] = 3
+    push.0                      # V[1] = 0
+    push.0                      # V[2] = 0
+    push.0                      # V[3] = 0  (top)
+    exec.mtree_verify_op
+    # Post-mtree_verify layout (success):
+    #   inputs left in place -> drop V (4), d (1), i (1), R_A (4).
+    dropw drop drop dropw
+
+    # ===================================================
+    # 3. mtree_set: overwrite leaf[3] with [9, 0, 0, 0]
+    # ===================================================
+    # Layout (from top): [d=2, i=3, R_old[3..0], V_new[3..0], ...]
+    # Push V_new[0..3] then R_old[0..3] then i then d.
+    push.9                      # V_new[0] = 9
+    push.0                      # V_new[1] = 0
+    push.0                      # V_new[2] = 0
+    push.0                      # V_new[3] = 0
+    push.0x6696202345be0a88    # R_old[0]
+    push.0x9514b040776e6417    # R_old[1]
+    push.0x080a78289af10043    # R_old[2]
+    push.0x34054b3ff32fd689    # R_old[3]
+    push.3                      # i = 3
+    push.2                      # d = 2
+    exec.mtree_set_op
+    # Post-mtree_set layout (from top):
+    #   [V_old[3]=0, V_old[2]=0, V_old[1]=0, V_old[0]=4, R_new[3..0], ...]
+    # Drop V_old (4) so R_new is on top.  The matching test pins
+    # the four R_new felts via the `mem_storew.100` snapshot
+    # below (memory-ledger pinning bypasses the recorder's
+    # cycle_idx==1 fragmentation across multi-cycle drops --
+    # see comments in `memory_word_ops_test.masm`).
+    dropw
+    # Snapshot R_new into memory at address 100 so the next
+    # asmop's cycle_idx==1 boundary catches a clean Word from
+    # `mem_loadw.100` (single-cycle word load -- the recorder
+    # has a `pending_word` drain that surfaces this as a typed
+    # `ValueRecord::Sequence` named `word`).
+    mem_storew.100
+    mem_loadw.100
+
+    # Drain everything else so the program ends at depth 16.
+    dropw       # R_new
+    drop        # leading push.0
+end

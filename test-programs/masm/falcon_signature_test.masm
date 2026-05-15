@@ -1,0 +1,50 @@
+# falcon_signature_test.masm
+#
+# Exercises the stdlib `rpo_falcon512::verify` procedure against
+# a fixed `(public_key, message, signature)` triple constructed
+# at TEST TIME using the deterministic seeded-RNG path:
+#
+#   * `SecretKey::with_rng(&mut RpoRandomCoin::new([0; 4]))`
+#     generates a deterministic Falcon secret key.
+#   * `sk.sign_with_rng(message, &mut RpoRandomCoin::new([1; 4]))`
+#     produces a deterministic signature.
+#   * `miden_stdlib::falcon_sign(&sk_felts, msg)` re-encodes the
+#     signature in the format the in-VM verifier expects.
+#
+# At record time the test materialises a TEMP COPY of this file
+# with the following sections appended:
+#
+#   `# operand_stack: <8 felts>` — staged with the message
+#       (4 felts) followed by the public-key digest (4 felts)
+#       so the stack at `begin` start is `[MSG, PK]` per the
+#       `rpo_falcon512::verify` calling convention.
+#
+#   `# advice_map: <sig_key_word>; <signature_felts>` — the
+#       signature data keyed by `Rpo256::merge(&[message, PK])`
+#       so that `move_sig_from_map_to_adv_stack` can fetch it.
+#
+# Once those declarations are appended, the recorder's
+# `parse_operand_stack` and `parse_advice_map` parsers stage
+# the inputs and the `rpo_falcon512::verify` procedure runs
+# to completion (it returns silently on success and panics on
+# failure, so a successful trace is the strict pin).
+#
+# Strict pin (matching test):
+#
+#   * Function table contains `#main` plus the stdlib's
+#     `rpo_falcon512::verify` (and the helper procedures the
+#     verify call depends on -- assembler-inlined ones surface
+#     under their inlined-callee context).
+#   * The `verify` procedure surfaces as a Call/Return pair.
+#   * The recorded trace finalises cleanly (no
+#     `EventLogKind::Error` event indicates verify panicked).
+#   * The recorder records the verifier as a non-trivial trace
+#     (>=4 calls, >=200 steps -- well above the empty-trace
+#     baseline; the actual count is pinned exactly).
+
+use.std::crypto::dsa::rpo_falcon512
+
+begin
+    exec.rpo_falcon512::move_sig_from_map_to_adv_stack
+    exec.rpo_falcon512::verify
+end

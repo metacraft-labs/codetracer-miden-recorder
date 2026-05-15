@@ -38,3 +38,16 @@ tempfile = "3"
 miden-testing = "0.14"
 miden-protocol = { version = "0.14", features = ["testing"] }
 tokio = { version = "1", features = ["rt", "macros"] }
+# Used in falcon_signature_test_via_ct_print_full to construct
+# a real Falcon signature against a fixed (PK, MSG) pair so the
+# fixture's `# advice_map:` declaration carries a verifiable
+# signature.  miden-stdlib exposes `falcon_sign` (the helper
+# that encodes the signature in the format the in-VM verifier
+# expects); miden-crypto exposes `SecretKey` for offline
+# key generation.
+miden-crypto = "0.14"
+# Re-imported in tests to use the `falcon_sign` helper that
+# encodes a Falcon signature in the format the in-VM verifier
+# expects (challenge, expanded key polynomials, signature
+# polynomial, product polynomial, nonce).
+miden-stdlib = { version = "0.14", features = ["std"] }

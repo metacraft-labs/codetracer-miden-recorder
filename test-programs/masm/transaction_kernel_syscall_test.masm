@@ -1,0 +1,68 @@
+# transaction_kernel_syscall_test.masm
+#
+# Exercises Miden's `syscall.X` cross-context boundary against a
+# custom kernel MASM module declared inline via the recorder's
+# `# kernel_module:` block parser.
+#
+# Two kernel procedures are defined inline:
+#
+#   * `kernel_get_block_number` — pushes a fixed block number
+#     (777) on top of the operand stack, simulating a kernel-side
+#     accessor into the chain state.  This is structurally
+#     analogous to Miden's transaction-kernel
+#     `account::get_block_number` that surfaces the current
+#     block height to the user transaction script.
+#
+#   * `kernel_add_one` — pops one felt, adds 1, pushes the
+#     result.  Stand-in for a kernel-side computation that
+#     transforms a user-supplied value.
+#
+# The fixture invokes both via `syscall.X` (the third call-kind
+# distinct from `exec.X` and `call.X`).  At the protocol layer
+# `syscall` is a true cross-context call: the kernel runs in a
+# distinct memory context and FMP, with the operand stack
+# normalised at the boundary (analogous to `call.X`).  The
+# recorder must surface each syscall as a Call/Return pair tagged
+# `SysCall` via the static call-graph parser
+# (`tracer::parse_call_kinds`).
+#
+# Strict pin (matching test):
+#   * The recorder's `parse_kernel_module` parser materialises
+#     the inline kernel block into a `KernelLibrary`; `assemble_kernel`
+#     succeeds and the program assembles with `syscall.X`
+#     references resolved.
+#   * Two distinct syscall call_entry events surface (one per
+#     kernel procedure invocation) with the static call-graph
+#     classifying both as `CallKind::SysCall`.
+#   * The first syscall's post-return step shows stack[0] = 777
+#     (the kernel-staged block number), and the second
+#     syscall's post-return step shows stack[0] = 778
+#     (777 + 1).
+#
+# kernel_module:
+# > export.kernel_get_block_number
+# >     push.777
+# >     swap drop
+# > end
+# >
+# > export.kernel_add_one
+# >     push.1 add
+# > end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+    # First syscall: kernel pushes 777 on top.  Per Miden's
+    # call.X / syscall.X calling convention the operand stack
+    # is truncated to 16 felts and the kernel inherits the
+    # caller's top felts in order.  The kernel's
+    # `kernel_get_block_number` does `push.777 swap drop` so
+    # stack[0] post-syscall is 777 and the caller's pre-call
+    # stack[0] is replaced.  Net stack delta: 0.
+    syscall.kernel_get_block_number
+    # Second syscall: kernel pops top, adds 1, pushes result.
+    # Net stack delta: 0.
+    syscall.kernel_add_one
+    # Drain the leading push.0 plus the syscall result.
+    drop drop
+end

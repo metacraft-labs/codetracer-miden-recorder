@@ -1,0 +1,100 @@
+# transaction_account_storage_test.masm
+#
+# Simulates a Miden transaction's account-storage interaction
+# by wrapping the canonical `account::get_item.N` /
+# `account::set_item.N` access pattern in user-defined
+# procedures backed by raw `mem_store` / `mem_load` ops.  This
+# fixture exercises the recorder's call-graph + value-event
+# layering for storage-slot accesses without depending on the
+# Miden transaction kernel infrastructure (which would require
+# a full MockChain harness — see the M11 deliverables in the
+# Miden-VM.status.org spec).
+#
+# Storage layout (memory addresses 100..103 represent four
+# consecutive account-storage slots):
+#
+#   slot 0 -> mem[100] (initial value: 0)
+#   slot 1 -> mem[101] (initial value: 0)
+#   slot 2 -> mem[102] (initial value: 0)
+#   slot 3 -> mem[103] (initial value: 0)
+#
+# Procedure conventions match Miden's transaction kernel:
+#
+#   `account_set_item.N`
+#       Stack convention: [slot, value, ...] -> [...]
+#       Writes `value` to storage at `slot` (mapped to
+#       address 100 + slot).
+#
+#   `account_get_item.N`
+#       Stack convention: [slot, ...] -> [value, ...]
+#       Reads the value at storage `slot`.
+#
+# Driver:
+#   1. Write value 42 to slot 0 (key=100, value=42).
+#   2. Write value 99 to slot 2 (key=102, value=99).
+#   3. Read back slot 0 (expect 42).
+#   4. Read back slot 2 (expect 99).
+#   5. Read slot 1 (untouched, expect 0).
+#
+# Strict pin (matching test):
+#   * Function table: #main + 2 helper procedures.
+#   * Each `account_set_item` invocation surfaces with its
+#     (slot, value) pair on the call_entry args.
+#   * Each `account_get_item` invocation surfaces with the
+#     queried slot on call_entry; the post-call step shows
+#     the read value on stack[0].
+#   * The two writes leave `mem[100] = 42` and `mem[102] = 99`
+#     observable via the recorder's local-memory snapshot at
+#     subsequent steps (these would be visible if the helper
+#     used `loc_store.N` instead of `mem_store`; here we pin
+#     the call/return shapes and stack values which already
+#     unambiguously witness the storage state).
+
+proc.account_set_item.0
+    # Stack on entry: [slot, value, ...].
+    # mem_store consumes [addr, val, ...] -> [...] so we add the
+    # slot offset to map slot N to address 100+N (all set/get
+    # operations share the same storage base address).
+    add.100         # slot -> addr = slot + 100
+    mem_store
+end
+
+proc.account_get_item.0
+    # Stack on entry: [slot, ...].
+    # mem_load consumes [addr, ...] -> [val, ...].
+    add.100         # slot -> addr
+    mem_load
+end
+
+begin
+    # Leading push so #main is the first observed asmop context.
+    push.0
+
+    # ===== set_item slot=0, value=42 =====
+    push.42         # value
+    push.0          # slot
+    exec.account_set_item
+
+    # ===== set_item slot=2, value=99 =====
+    push.99
+    push.2
+    exec.account_set_item
+
+    # ===== get_item slot=0 (expect 42) =====
+    push.0          # slot
+    exec.account_get_item
+    # stack[0] now == 42
+
+    # ===== get_item slot=2 (expect 99) =====
+    push.2
+    exec.account_get_item
+    # stack[0] now == 99, stack[1] still 42
+
+    # ===== get_item slot=1 (expect 0, untouched) =====
+    push.1
+    exec.account_get_item
+    # stack[0] now == 0, stack[1]=99, stack[2]=42
+
+    # Drain everything: 3 felts from get_item reads + 1 leading.
+    drop drop drop drop
+end

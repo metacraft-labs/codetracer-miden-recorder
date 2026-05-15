@@ -1,0 +1,88 @@
+# cross_context_call_test.masm
+#
+# Exercises the caller / callee context isolation that Miden's
+# `call.X` boundary establishes.  Unlike `exec.X` (inline expansion
+# in the caller's memory context, no stack-depth normalisation),
+# `call.X` is a true cross-context call that:
+#
+#   1. Allocates a fresh memory context (writes at `mem_store.N`
+#      inside the callee land in the callee's distinct memory
+#      space; they are not visible to the caller via the same
+#      address after return).
+#   2. Normalises the operand stack at the boundary: the callee
+#      observes a 16-felt stack at entry whose top elements are
+#      the caller-passed arguments (Miden's calling convention
+#      for `call.X` truncates the stack to exactly 16 felts).
+#
+# Layout:
+#
+#   `proc.callee.1`  — declares one local slot (`loc_store.0`),
+#                      writes `loc_store.0` and `mem_store.10`
+#                      to demonstrate the callee has its own
+#                      FMP-relative local frame and its own
+#                      memory context.  Returns a known constant
+#                      (777) on top of the stack so the caller
+#                      can verify the cross-context return.
+#
+#   `begin`         — `push.123 push.456 mem_store.10` writes
+#                      a marker into the CALLER's memory at
+#                      address 10, then `call.callee` invokes
+#                      the callee in a fresh context.  After
+#                      return, the caller can observe stack[0]
+#                      == 777 (callee's return value), proving
+#                      the cross-context call returned a value
+#                      via the operand stack.
+#
+# Strict pin (matching test): the callee's call_entry stages a
+# truncated 4-felt stack snapshot (s0..s3 = the caller's top
+# four felts), and the post-call step in `#main` carries the
+# callee's return value (777) on stack[0].
+
+proc.callee.1
+    # Write a value to the callee's local slot 0 (FMP-relative).
+    # The callee's FMP is fresh (Miden allocates a new local
+    # frame for each `call.X` invocation), so this write does
+    # not collide with any caller-side local state.
+    push.555
+    loc_store.0
+    # Write to the callee's memory context at address 10.
+    # The caller wrote 456 at the same address pre-call -- the
+    # callee's write here lands in the callee's distinct memory
+    # context, so the caller's value at address 10 remains 456
+    # after the call returns.  (The recorder's memory variable
+    # tracking does not yet surface this isolation directly --
+    # see cross_context_call_test_via_ct_print_full's notes --
+    # but the side-effect is observable via the FMP boundary.)
+    push.999 push.10
+    mem_store
+    # Push the callee's return value (777) on top of the stack.
+    # Miden's `call.X` calling convention truncates the operand
+    # stack to exactly 16 felts at the boundary, so anything
+    # below stack[15] is dropped.  The return value lives at
+    # stack[0] when the callee returns.  We then drop stack[1]
+    # so the net stack depth on return matches the call's
+    # entry depth (16 -> 16).
+    push.777
+    swap drop
+end
+
+begin
+    # Marker value written to the CALLER's memory context at
+    # address 10.  After `call.callee` returns, this value
+    # remains intact -- the callee's mem_store.10 lands in the
+    # callee's distinct memory space.
+    push.456 push.10
+    mem_store
+    # Leading push so the recorder synthesises a #main call frame.
+    push.123
+    # The cross-context call.  Per Miden's calling convention
+    # the operand stack is truncated to 16 felts at this
+    # boundary; the callee sees the caller's top 16 felts as
+    # its starting stack.  After return, the callee's return
+    # value (777) is on stack[0] and the caller's prior top
+    # (123) is on stack[1].
+    call.callee
+    # Drop the callee's return value and the caller's marker
+    # so the program ends with a clean stack.
+    drop drop
+end

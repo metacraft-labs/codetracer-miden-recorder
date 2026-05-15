@@ -11,6 +11,8 @@ use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
 use eyre::{Context, Result, eyre};
 use miden_assembly::Assembler;
+use miden_core::crypto::merkle::{MerkleStore, MerkleTree};
+use miden_core::{Felt, Word};
 use miden_processor::{
     AdviceInputs, AsmOpInfo, DefaultHost, MemAdviceProvider, StackInputs, VmState, execute_iter,
 };
@@ -97,10 +99,45 @@ impl MidenTracer {
         // directive errors out at assembly time -- see
         // `test-programs/masm/stdlib_imports_test.masm`.
         let stdlib = StdLibrary::default();
-        let assembler = Assembler::default()
-            .with_debug_mode(true)
-            .with_library(stdlib.clone())
-            .map_err(|e| eyre!("failed to load miden stdlib: {e}"))?;
+        // Optional kernel: parse `# kernel_module:` blocks from the
+        // source so fixtures that exercise `syscall.X` can declare
+        // their kernel procedures inline.  When a kernel block is
+        // present, use `Assembler::with_kernel` so the assembler
+        // resolves `syscall.X` references; when absent, fall back
+        // to `Assembler::default()`.  The kernel's MAST forest is
+        // also loaded into the host below so the runtime can
+        // resolve syscall procedures by digest.
+        let kernel_src = parse_kernel_module(source_code);
+        let kernel_library = if let Some(ref ks) = kernel_src {
+            let sm = miden_assembly::DefaultSourceManager::default();
+            let sm: std::sync::Arc<dyn miden_assembly::SourceManager> = std::sync::Arc::new(sm);
+            Some(
+                Assembler::new(sm)
+                    .with_debug_mode(true)
+                    .assemble_kernel(ks.as_str())
+                    .map_err(|e| eyre!("failed to assemble inline kernel: {e}"))?,
+            )
+        } else {
+            None
+        };
+        let assembler = if let Some(ref klib) = kernel_library {
+            let sm = klib.mast_forest().clone();
+            // Need to thread a fresh source manager through both the
+            // kernel and the with_kernel assembler.  Use a shared
+            // SourceManager here.
+            let _ = sm; // silence unused
+            let sm: std::sync::Arc<dyn miden_assembly::SourceManager> =
+                std::sync::Arc::new(miden_assembly::DefaultSourceManager::default());
+            Assembler::with_kernel(sm, klib.clone())
+                .with_debug_mode(true)
+                .with_library(stdlib.clone())
+                .map_err(|e| eyre!("failed to load miden stdlib: {e}"))?
+        } else {
+            Assembler::default()
+                .with_debug_mode(true)
+                .with_library(stdlib.clone())
+                .map_err(|e| eyre!("failed to load miden stdlib: {e}"))?
+        };
         let source_manager = assembler.source_manager();
         let program = assembler
             .assemble_program(source_path.to_path_buf())
@@ -114,7 +151,19 @@ impl MidenTracer {
         // into the assembler alone is not sufficient: the run-time error
         // would be `no MAST forest contains the procedure with root
         // digest 0x...`.
-        let stack_inputs = StackInputs::default();
+        // Parse `# operand_stack: V0, V1, ...` so fixtures that
+        // need a non-default initial operand stack (e.g. Falcon
+        // verification with PK + MSG pre-staged) can declare
+        // their inputs inline.  StackInputs::new reverses the
+        // values: the LAST item in the source list ends up on
+        // top of the operand stack.
+        let stack_input_values = parse_operand_stack(source_code);
+        let stack_inputs = if stack_input_values.is_empty() {
+            StackInputs::default()
+        } else {
+            StackInputs::try_from_ints(stack_input_values.iter().copied())
+                .map_err(|e| eyre!("invalid `# operand_stack:` declaration: {e}"))?
+        };
         // Parse `# advice_stack: V0, V1, ...` from the MASM source so
         // fixtures that exercise advice-tape ops (`adv_push.N`,
         // `adv_loadw`) can declare their inputs inline.  The advice
@@ -124,12 +173,48 @@ impl MidenTracer {
         // pushes them onto the advice stack in that order.  See
         // `advice_tape_test.masm` for the canonical fixture shape.
         let advice_stack = parse_advice_stack(source_code);
-        let advice_inputs = AdviceInputs::default()
+        let mut advice_inputs = AdviceInputs::default()
             .with_stack_values(advice_stack.iter().copied())
             .map_err(|e| eyre!("invalid `# advice_stack:` declaration: {e}"))?;
+        // Parse `# advice_map: <key_word_felts>; <value_felts>`
+        // declarations so fixtures that need pre-populated advice-map
+        // entries (e.g. Falcon signatures keyed by Rpo256 digest)
+        // can declare their inputs inline.  Each declaration's key
+        // is exactly 4 felts (a Word, the canonical Rpo256 digest
+        // size), and the value is an arbitrary-length felt vector.
+        let advice_map_entries = parse_advice_map(source_code);
+        for (key, values) in &advice_map_entries {
+            advice_inputs.extend_map([(*key, values.clone())]);
+        }
+        // Parse `# merkle_tree: leaf0_w0 leaf0_w1 leaf0_w2 leaf0_w3, ...`
+        // declarations from the source so fixtures that exercise
+        // `mtree_get` / `mtree_set` / `mtree_verify` can declare the
+        // tree contents inline.  Each parsed tree is materialised
+        // into a `MerkleTree`, its inner nodes are extended into the
+        // advice provider's `MerkleStore`, and the tree's root is
+        // tracked separately so the test can stage the root on the
+        // operand stack via `# merkle_root_inputs:`.
+        let merkle_trees = parse_merkle_trees(source_code);
+        if !merkle_trees.is_empty() {
+            let mut store = MerkleStore::default();
+            for leaves in &merkle_trees {
+                let tree = MerkleTree::new(leaves.clone())
+                    .map_err(|e| eyre!("invalid `# merkle_tree:` declaration: {e}"))?;
+                store.extend(tree.inner_nodes());
+            }
+            advice_inputs = advice_inputs.with_merkle_store(store);
+        }
         let mut host = DefaultHost::new(MemAdviceProvider::from(advice_inputs));
         host.load_mast_forest(stdlib.mast_forest().clone())
             .map_err(|e| eyre!("failed to load stdlib MAST forest into host: {e}"))?;
+        // Load the kernel's MAST forest into the host so the runtime
+        // can resolve `syscall.X` invocations by digest.  Without
+        // this load, syscall execution errors with "procedure with
+        // root <digest> was not found in the kernel".
+        if let Some(ref klib) = kernel_library {
+            host.load_mast_forest(klib.mast_forest().clone())
+                .map_err(|e| eyre!("failed to load kernel MAST forest into host: {e}"))?;
+        }
         let vm_state_iter = execute_iter(&program, stack_inputs, &mut host, source_manager);
 
         // -- 3. Build source map for byte-offset -> line mapping ----------------------
@@ -878,6 +963,257 @@ pub fn parse_advice_stack(source: &str) -> Vec<u64> {
         }
     }
     out
+}
+
+/// Parse `# operand_stack: V0, V1, V2, ...` declarations from a
+/// MASM source.  Returns the comma-separated u64 values in source
+/// order — `StackInputs::try_from_ints` then reverses them so the
+/// LAST declared value ends up on top of the operand stack.
+///
+/// Multiple `# operand_stack:` lines are concatenated (in source
+/// order).  Hex literals (`0x...`) are supported alongside
+/// decimal literals.
+///
+/// Public so per-fixture tests can validate the parser
+/// independently of the runtime path.
+pub fn parse_operand_stack(source: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        let body = match trimmed.strip_prefix('#') {
+            Some(b) => b.trim(),
+            None => continue,
+        };
+        let values_str = match body.strip_prefix("operand_stack:") {
+            Some(v) => v.trim(),
+            None => continue,
+        };
+        if values_str.is_empty() {
+            continue;
+        }
+        for token in values_str
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            let parsed = if let Some(hex) = token
+                .strip_prefix("0x")
+                .or_else(|| token.strip_prefix("0X"))
+            {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                token.parse::<u64>().ok()
+            };
+            if let Some(v) = parsed {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// Parse `# advice_map: <4 key felts>; <value felts>` declarations
+/// from a MASM source.  Each declaration's key is an RPO digest
+/// (4 felts), and the value is an arbitrary-length felt vector.
+/// The semicolon separates the key from the value.  Multiple
+/// declarations may appear on different `# advice_map:` lines.
+///
+/// Returns a vector of `(RpoDigest, Vec<Felt>)` pairs in source
+/// order.  Hex literals are supported alongside decimal literals
+/// (parsed identically to `parse_advice_stack`).
+///
+/// Public for per-fixture tests.
+pub fn parse_advice_map(source: &str) -> Vec<(miden_core::crypto::hash::RpoDigest, Vec<Felt>)> {
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        let body = match trimmed.strip_prefix('#') {
+            Some(b) => b.trim(),
+            None => continue,
+        };
+        let values_str = match body.strip_prefix("advice_map:") {
+            Some(v) => v.trim(),
+            None => continue,
+        };
+        if values_str.is_empty() {
+            continue;
+        }
+        let mut parts = values_str.splitn(2, ';');
+        let key_str = match parts.next() {
+            Some(s) => s.trim(),
+            None => continue,
+        };
+        let val_str = match parts.next() {
+            Some(s) => s.trim(),
+            None => continue,
+        };
+        let parse_one = |t: &str| -> Option<u64> {
+            if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                t.parse::<u64>().ok()
+            }
+        };
+        let key_felts: Vec<u64> = key_str.split_whitespace().filter_map(parse_one).collect();
+        if key_felts.len() != 4 {
+            continue;
+        }
+        let value_felts: Vec<Felt> = val_str
+            .split_whitespace()
+            .filter_map(parse_one)
+            .map(Felt::new)
+            .collect();
+        let digest = miden_core::crypto::hash::RpoDigest::new([
+            Felt::new(key_felts[0]),
+            Felt::new(key_felts[1]),
+            Felt::new(key_felts[2]),
+            Felt::new(key_felts[3]),
+        ]);
+        out.push((digest, value_felts));
+    }
+    out
+}
+
+/// Parse a `# kernel_module:` block from the source.  The block
+/// starts with a `# kernel_module:` line and continues with
+/// consecutive `# > <line>` lines whose `<line>` content is
+/// concatenated (newline-separated) into the kernel module's MASM
+/// source.  The block ends at the first non-`# >` line.  Returns
+/// `Some(source)` if a block was found, or `None` otherwise.
+///
+/// Example:
+/// ```text
+/// # kernel_module:
+/// # > export.kernel_proc
+/// # >     push.42
+/// # > end
+/// ```
+///
+/// produces the kernel source `"export.kernel_proc\n    push.42\nend"`.
+///
+/// Public so per-fixture tests can validate the parser independently
+/// of the assembler path.
+pub fn parse_kernel_module(source: &str) -> Option<String> {
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        let body = match trimmed.strip_prefix('#') {
+            Some(b) => b.trim(),
+            None => continue,
+        };
+        if body == "kernel_module:" {
+            // Collect continuation lines until the first non-`# >` line.
+            let mut out = String::new();
+            for cont in lines.by_ref() {
+                let ct = cont.trim();
+                let body = match ct.strip_prefix('#') {
+                    Some(b) => b,
+                    None => break,
+                };
+                let rest = match body.trim_start().strip_prefix('>') {
+                    Some(r) => r,
+                    None => break,
+                };
+                // Preserve the line's content after the `>` marker;
+                // strip a single leading space (the convention is
+                // `# > <code>`).
+                let content = rest.strip_prefix(' ').unwrap_or(rest);
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(content);
+            }
+            if !out.is_empty() {
+                return Some(out);
+            }
+        }
+    }
+    None
+}
+
+/// Parse `# merkle_tree: <leaves>` declarations from the source.
+/// Each declaration carries the leaf words for one Merkle tree as
+/// space-separated felts grouped 4-per-leaf, with leaves separated
+/// by `;`.  Example:
+///
+/// ```text
+/// # merkle_tree: 1 0 0 0 ; 2 0 0 0 ; 3 0 0 0 ; 4 0 0 0
+/// ```
+///
+/// declares a single 4-leaf tree.  Multiple `# merkle_tree:` lines
+/// declare multiple trees (each independent).  All trees are
+/// materialised into a single `MerkleStore` extended into the
+/// advice provider.  The number of leaves per tree must be a power
+/// of two and >= 2 (Miden's `MerkleTree::new` rejects otherwise).
+///
+/// Public so per-fixture tests can validate the parser against the
+/// reference Merkle root computed offline.
+pub fn parse_merkle_trees(source: &str) -> Vec<Vec<Word>> {
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        let body = match trimmed.strip_prefix('#') {
+            Some(b) => b.trim(),
+            None => continue,
+        };
+        let values_str = match body.strip_prefix("merkle_tree:") {
+            Some(v) => v.trim(),
+            None => continue,
+        };
+        if values_str.is_empty() {
+            continue;
+        }
+        let mut leaves = Vec::new();
+        for leaf_str in values_str
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let elems: Vec<u64> = leaf_str
+                .split_whitespace()
+                .filter_map(|t| {
+                    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                        u64::from_str_radix(hex, 16).ok()
+                    } else {
+                        t.parse::<u64>().ok()
+                    }
+                })
+                .collect();
+            if elems.len() != 4 {
+                continue;
+            }
+            let word: Word = [
+                Felt::new(elems[0]),
+                Felt::new(elems[1]),
+                Felt::new(elems[2]),
+                Felt::new(elems[3]),
+            ];
+            leaves.push(word);
+        }
+        if leaves.len() >= 2 && leaves.len().is_power_of_two() {
+            out.push(leaves);
+        }
+    }
+    out
+}
+
+/// Compute the RPO root of a Merkle tree built from the given
+/// leaves — used by fixture tests to assert the post-`mtree_set`
+/// reference root without reproducing the RPO computation by hand.
+/// Returns the root as four felts in the canonical Miden ordering
+/// (the same order that `mtree_*` ops surface on the operand
+/// stack).  Public for direct test use.
+pub fn merkle_tree_root_felts(leaves: &[Word]) -> Result<[u64; 4]> {
+    let tree = MerkleTree::new(leaves.to_vec())
+        .map_err(|e| eyre!("merkle_tree_root_felts: invalid leaves: {e}"))?;
+    let root = tree.root();
+    let elems: [Felt; 4] = root.into();
+    Ok([
+        elems[0].as_int(),
+        elems[1].as_int(),
+        elems[2].as_int(),
+        elems[3].as_int(),
+    ])
 }
 
 /// Returns `Some(n)` for `adv_push.N` ops where N is the count of
