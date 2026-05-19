@@ -61,14 +61,9 @@ impl MidenTracer {
         // from the `.bin` extension.  No JSON / legacy-binary alternative
         // is exposed.
         let events_path = out_dir.join("trace.bin");
-        let metadata_path = out_dir.join("trace_metadata.json");
-        let paths_path = out_dir.join("trace_paths.json");
 
         Self::trace_program_with_writer(source_path, source_code, writer, |w| {
             TraceWriter::begin_writing_trace_events(w, &events_path).map_err(|e| eyre!("{e}"))?;
-            TraceWriter::begin_writing_trace_metadata(w, &metadata_path)
-                .map_err(|e| eyre!("{e}"))?;
-            TraceWriter::begin_writing_trace_paths(w, &paths_path).map_err(|e| eyre!("{e}"))?;
             Ok(())
         })?;
         Ok(())
@@ -250,9 +245,9 @@ impl MidenTracer {
 
         // -- 8. Finish writing --------------------------------------------------------
         TraceWriter::finish_writing_trace_events(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
-        TraceWriter::finish_writing_trace_metadata(&mut *tracer.writer)
+        tracer.writer
+            .write_meta_dat("codetracer-miden-recorder")
             .map_err(|e| eyre!("{e}"))?;
-        TraceWriter::finish_writing_trace_paths(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
         TraceWriter::close(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
 
         Ok(tracer.writer)
