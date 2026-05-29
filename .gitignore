@@ -2,3 +2,9 @@
 .env
 .direnv
 ct-traces/
+
+# Nix build outputs
+result
+result-bin
+result-lib
+result-man
