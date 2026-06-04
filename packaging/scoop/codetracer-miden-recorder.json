@@ -1,0 +1,23 @@
+{
+  "version": "0.1.0",
+  "description": "CodeTracer recorder for Miden VM programs (MASM and Rust-via-midenc)",
+  "homepage": "https://github.com/metacraft-labs/codetracer-miden-recorder",
+  "license": "Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/metacraft-labs/codetracer-miden-recorder/releases/download/v0.1.0/codetracer-miden-recorder-0.1.0-windows-x86_64.zip",
+      "hash": "REPLACE_AT_PUBLISH_TIME_windows_x86_64"
+    }
+  },
+  "bin": "codetracer-miden-recorder.exe",
+  "checkver": {
+    "github": "https://github.com/metacraft-labs/codetracer-miden-recorder"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/metacraft-labs/codetracer-miden-recorder/releases/download/v$version/codetracer-miden-recorder-$version-windows-x86_64.zip"
+      }
+    }
+  }
+}
