@@ -245,7 +245,8 @@ impl MidenTracer {
 
         // -- 8. Finish writing --------------------------------------------------------
         TraceWriter::finish_writing_trace_events(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
-        tracer.writer
+        tracer
+            .writer
             .write_meta_dat("codetracer-miden-recorder")
             .map_err(|e| eyre!("{e}"))?;
         TraceWriter::close(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
