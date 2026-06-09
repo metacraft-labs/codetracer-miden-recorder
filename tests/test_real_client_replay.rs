@@ -255,7 +255,7 @@ fn test_capture_replay_pipeline_with_real_data() {
     // Step 2: Replay from captured inputs.
     let config = ReplayConfig::new(
         "https://rpc.testnet.miden.io",
-        &format!("0x{:x}", inputs.account.id),
+        format!("0x{:x}", inputs.account.id),
         "0xtest_real_replay",
         &output_dir,
     )
@@ -945,7 +945,7 @@ fn test_replay_error_without_captured_inputs_real_config() {
 
     let config = ReplayConfig::new(
         "https://rpc.testnet.miden.io",
-        &format!("0x{:x}", account_id_to_u64(wallet.id())),
+        format!("0x{:x}", account_id_to_u64(wallet.id())),
         "0xtest_tx",
         "/tmp/output",
     );
@@ -1119,7 +1119,7 @@ async fn test_end_to_end_real_tx_capture_replay() {
     // Step 3: Replay from captured inputs.
     let config = ReplayConfig::new(
         "https://rpc.testnet.miden.io",
-        &format!("0x{:x}", account_id_to_u64(receiver.id())),
+        format!("0x{:x}", account_id_to_u64(receiver.id())),
         "0xe2e_test_tx",
         &output_dir,
     )
