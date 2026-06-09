@@ -1,3 +1,9 @@
+// Integration tests with explicit fixture-table literals use slice
+// types that trip clippy::type_complexity.  Factoring those into
+// named type aliases would make the test data harder to read in
+// place.
+#![allow(clippy::type_complexity)]
+
 //! CLI-surface integration tests for `codetracer-miden-recorder`.
 //!
 //! Tests cover three areas:
