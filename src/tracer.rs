@@ -1200,7 +1200,7 @@ pub fn parse_merkle_trees(source: &str) -> Vec<Vec<Word>> {
 /// (the same order that `mtree_*` ops surface on the operand
 /// stack).  Public for direct test use.
 pub fn merkle_tree_root_felts(leaves: &[Word]) -> Result<[u64; 4]> {
-    let tree = MerkleTree::new(leaves.to_vec())
+    let tree = MerkleTree::new(leaves)
         .map_err(|e| eyre!("merkle_tree_root_felts: invalid leaves: {e}"))?;
     let root = tree.root();
     let elems: [Felt; 4] = root.into();
