@@ -1,3 +1,23 @@
+// Clippy lints flagged here are stylistic and don't apply meaningfully
+// to integration-test scaffolding:
+//
+// * collapsible_if: nested `if let X { if let Y { ... } }` is clearer
+//   than a let-chain when the test wants to read top-to-bottom.
+// * double_ended_iterator_last: the slice iterator's `last()` is the
+//   intent ("find the last matching index"); the linear-scan vs.
+//   reverse-search difference is irrelevant on test-sized inputs.
+// * needless_lifetimes: explicit lifetime makes the helper signatures
+//   easier to read in this file.
+// * doc_lazy_continuation / doc_overindented_list_items: the docblocks
+//   intentionally use indented continuation prose.
+#![allow(
+    clippy::collapsible_if,
+    clippy::double_ended_iterator_last,
+    clippy::needless_lifetimes,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items
+)]
+
 //! Integration tests for the Miden tracer.
 //!
 //! These tests cover two complementary layers:
