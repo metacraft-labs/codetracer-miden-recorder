@@ -1251,8 +1251,7 @@ fn test_control_flow_test_via_ct_print_full() {
     // `local[0]` is empty because no procedure has run yet.
     let main_step = events
         .iter()
-        .filter(|e| e["kind"] == "step" && e["function"].as_str() == Some("#exec::#main"))
-        .next_back()
+        .rfind(|e| e["kind"] == "step" && e["function"].as_str() == Some("#exec::#main"))
         .expect("step inside #main");
     let local0_at_main = main_step["vars"]
         .as_array()
