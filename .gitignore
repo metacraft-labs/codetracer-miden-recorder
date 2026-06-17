@@ -8,3 +8,6 @@ result
 result-bin
 result-lib
 result-man
+
+# reprobuild build artifacts
+.repro/
