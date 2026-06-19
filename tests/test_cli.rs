@@ -183,8 +183,9 @@ fn test_record_creates_trace_files() {
 ///    contains the fixture source filename and at least one of the
 ///    MASM procedure names somewhere in the textual rendering.
 /// 2. **Exact decoded values** (the layer enabled by `ct-print --full`):
-///    the `compute.masm` program drives ten MASM procedures from a
-///    `begin` block — `fibonacci(10) → 55`, `factorial(7) → 5040`,
+///    the `compute.masm` program drives a `compute` procedure from the
+///    `begin` block; `compute` then calls ten helper procedures —
+///    `fibonacci(10) → 55`, `factorial(7) → 5040`,
 ///    `max_of_three(15, 42, 23) → 42`, `array_sum → 150`, etc.  The
 ///    canonical call sequence and the call-args staged by the recorder
 ///    (operand-stack top `s0..s3` at the call boundary) must surface
@@ -321,6 +322,7 @@ fn test_recorded_trace_via_ct_print_json() {
         "::nested_control_flow",
         "::arithmetic_demo",
         "::memory_word_ops",
+        "::compute",
     ] {
         assert!(
             functions.iter().any(|f| f.ends_with(name)),
@@ -349,42 +351,36 @@ fn test_recorded_trace_via_ct_print_json() {
     // backwards branch into the same source line so `repeat.N` bodies
     // surface one step per iteration (see
     // `test_control_flow_repeat_emits_step_per_iteration`).  For
-    // `compute.masm` that's a stable 180 step events and 11
-    // call_entry events: one synthesised `#main` for the begin-block
-    // (registered when `#main` is the first observed context — see
-    // `test_control_flow_call_exit_strict_lifo`) plus 10 user-procedure
-    // calls (the assembler dispatches each procedure once, with
-    // sibling collapse closing each before the next opens; the
-    // duplicate `nested_control_flow` is invoked twice from the
-    // begin-block).  The two extra steps over the pre-iteration-fix
-    // baseline come from the single-line `repeat.3` body in
-    // `nested_control_flow` (line 196 emits 3 steps now instead of
-    // 1).  These are stable properties of the canonical fixture — if
-    // they change, that's a real regression to investigate, not a
-    // flake.
+    // `compute.masm` that's a stable 182 step events and 12
+    // call_entry events: one synthesised `#main` for the begin-block,
+    // one real `compute` call frame, and 10 helper-procedure calls
+    // below `compute` (the duplicate `nested_control_flow` is invoked
+    // twice).  The two trace-anchor steps (`push.0 drop`) make the
+    // `#main -> compute -> helper` calltrace visible without changing
+    // the operand stack.  These are stable properties of the canonical
+    // fixture — if they change, that's a real regression to
+    // investigate, not a flake.
     let counts = &doc["counts"];
     assert_eq!(
         counts["steps"].as_u64(),
-        Some(180),
-        "expected 180 step events for compute.masm; counts={counts}",
+        Some(182),
+        "expected 182 step events for compute.masm; counts={counts}",
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(11),
-        "expected 11 call events for compute.masm; counts={counts}",
+        Some(12),
+        "expected 12 call events for compute.masm; counts={counts}",
     );
 
     let events = doc["events"].as_array().expect("events array");
 
     // ----- Call sequence: every call_entry now resolves to a named
-    // procedure.  The `begin` block dispatches procedures in this
-    // exact order.  The first event is the synthesised `#main` (see
-    // `test_control_flow_call_exit_strict_lifo`); the remaining 10
-    // entries are the user procedures observed in source order, with
-    // siblings (max_of_three → array_sum, bitwise_ops →
-    // stack_manipulation, arithmetic_demo → memory_word_ops) handled
-    // by the call-graph-driven sibling-collapse logic so each is
-    // closed before the next opens.
+    // procedure.  The `begin` block dispatches `compute`, and
+    // `compute` dispatches helpers in this exact order.  The first
+    // event is the synthesised `#main` (see
+    // `test_control_flow_call_exit_strict_lifo`); the second is the
+    // real `compute` frame that WDIO searches for; the remaining 10
+    // entries are the helper procedures observed in source order.
     let named_call_sequence: Vec<&str> = events
         .iter()
         .filter(|e| e["kind"] == "call_entry")
@@ -392,6 +388,7 @@ fn test_recorded_trace_via_ct_print_json() {
         .collect();
     let expected_call_sequence: &[&str] = &[
         "::#main",
+        "::compute",
         "::fibonacci",
         "::factorial",
         "::max_of_three",
@@ -493,6 +490,7 @@ fn test_recorded_trace_via_ct_print_json() {
     // `compute.masm` fixture is fully deterministic — every call
     // boundary produces exact, fixed felt values for `s0..s3`:
     //
+    //   * compute entry: stack-neutral trace anchors leave s0..s3 = 0
     //   * fibonacci entry: stack carries the input `n=10`     → s1=10
     //   * factorial entry: stack still has the fib(10)=55     → s2=55,
     //     and factorial's input `n=7` is on top                → s1=7
@@ -500,7 +498,7 @@ fn test_recorded_trace_via_ct_print_json() {
     //   * array_sum entry: carries factorial(7)=5040          → s2=5040
     //   * nested_control_flow entry: input n=8                → s0=8
     //
-    // These tie directly to the source program's `begin` block.  Any
+    // These tie directly to the source program's `compute` body.  Any
     // change that breaks them (a renamed procedure, a different stack
     // discipline at the call boundary, or a different felt encoding)
     // is a real regression worth investigating.
@@ -532,6 +530,11 @@ fn test_recorded_trace_via_ct_print_json() {
 
     let expected_args: &[(&str, usize, &[(&str, i64)])] = &[
         (
+            "::compute",
+            0,
+            &[("s0", 0), ("s1", 0), ("s2", 0), ("s3", 0)],
+        ),
+        (
             "::fibonacci",
             0,
             &[("s0", 0), ("s1", 10), ("s2", 0), ("s3", 0)],
@@ -551,18 +554,10 @@ fn test_recorded_trace_via_ct_print_json() {
             0,
             &[("s0", 100), ("s1", 15), ("s2", 5040), ("s3", 55)],
         ),
-        // Pre-fix the recorder minted out-of-range function ids when
-        // the same procedure was re-entered from a different asmop
-        // line, so the two trailing call_entries inside `compute.masm`
-        // had no resolvable `function` field.  Post-fix the dedup
-        // cache keeps the writer-level id stable, so every call_entry
-        // is named — and the previously-anonymous events resolve to
-        // `#main` and `nested_control_flow` (their actual context
-        // names at the boundary), not `arithmetic_demo`.  This means
-        // `nested_control_flow` now appears twice in the call sequence
-        // and `arithmetic_demo` only once; we update the args
-        // assertions to match the actual operand stack at each
-        // boundary.
+        // The fixture intentionally calls nested_control_flow twice,
+        // once with n=8 and once with n=3. Pin both call boundaries so
+        // a missing/reordered helper frame is caught by decoded args,
+        // not just by the call sequence assertion above.
         (
             "::nested_control_flow",
             0,
@@ -601,31 +596,23 @@ fn test_recorded_trace_via_ct_print_json() {
         }
     }
 
-    // ----- Exact step-variable assertion: fib's first step has n=10 --
-    // The very first step inside `#exec::fibonacci` (its line-279
-    // entry, just after the `push.10 exec.fibonacci` call site) must
-    // surface `stack[0] = 10`.  This anchors the test to the source
-    // program: changing `push.10` to `push.11` in the fixture's
-    // `begin` block would fail this assertion.
-    let fib_first_step = events
+    // ----- Exact step-variable assertion: fib computes 55 -------------
+    // The call boundary above pins the input (`s1 = 10`).  Inside
+    // `#exec::fibonacci`, the decoded step variables must also surface
+    // the computed result `stack[0] = 55`.
+    let fib_has_stack0_55 = events
         .iter()
-        .filter(|e| e["kind"] == "step")
-        .find(|e| {
-            e["function"]
-                .as_str()
-                .is_some_and(|f| f.ends_with("::fibonacci"))
+        .filter(|e| {
+            e["kind"] == "step"
+                && e["function"]
+                    .as_str()
+                    .is_some_and(|f| f.ends_with("::fibonacci"))
         })
-        .expect("expected at least one step inside fibonacci");
-    let fib_stack0 = fib_first_step["vars"]
-        .as_array()
-        .and_then(|vs| vs.iter().find(|v| v["varname"] == "stack[0]"))
-        .expect("fibonacci's first step should report stack[0]");
-    assert_eq!(
-        fib_stack0["value"]["i"].as_i64(),
-        Some(10),
-        "fibonacci's first step should see the input `n=10` on \
-         stack[0]; got {}",
-        fib_stack0["value"]
+        .flat_map(|e| e["vars"].as_array().into_iter().flatten())
+        .any(|v| v["varname"] == "stack[0]" && v["value"]["i"].as_i64() == Some(55));
+    assert!(
+        fib_has_stack0_55,
+        "fibonacci frame should surface computed stack[0] = 55"
     );
 }
 
