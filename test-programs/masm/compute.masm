@@ -341,4 +341,8 @@ begin
     # Trace anchor: surface #main before entering compute.
     push.0 drop
     exec.compute
+    # Trace anchors: give debugger step-over same-depth stops after compute.
+    push.0 drop
+    push.0 drop
+    push.0 drop
 end
