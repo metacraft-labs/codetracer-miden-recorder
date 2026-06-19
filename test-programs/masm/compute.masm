@@ -272,9 +272,12 @@ proc.memory_word_ops.0
 end
 
 # ---------------------------------------------------------------------------
-# Main entry point - calls all procedures and leaves results on the stack
+# proc.compute.0 - calls all procedures and leaves results on the stack
 # ---------------------------------------------------------------------------
-begin
+proc.compute.0
+    # Trace anchor: surface the compute frame before helper dispatch.
+    push.0 drop
+
     # 1. Fibonacci(10) = 55
     push.10
     exec.fibonacci
@@ -329,4 +332,17 @@ begin
     # Need to drop at least 10 to get to 16
     drop drop drop drop drop
     drop drop drop drop drop
+end
+
+# ---------------------------------------------------------------------------
+# Main entry point - dispatches the canonical compute procedure
+# ---------------------------------------------------------------------------
+begin
+    # Trace anchor: surface #main before entering compute.
+    push.0 drop
+    exec.compute
+    # Trace anchors: give debugger step-over same-depth stops after compute.
+    push.0 drop
+    push.0 drop
+    push.0 drop
 end
