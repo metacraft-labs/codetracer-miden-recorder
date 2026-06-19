@@ -577,6 +577,8 @@ fn test_miden_call_tree_structure() {
     // Verify all expected procedures are registered.
     let registered_names: HashSet<String> = fn_map.values().cloned().collect();
     let expected_procs = [
+        "#main",
+        "compute",
         "fibonacci",
         "factorial",
         "max_of_three",
@@ -598,14 +600,19 @@ fn test_miden_call_tree_structure() {
 
     // Reconstruct call tree.
     let mut call_tree: Vec<(String, String)> = Vec::new();
+    let mut active_calls: Vec<String> = Vec::new();
+    let mut call_edges: Vec<(Option<String>, String)> = Vec::new();
     for event in &events {
         match event {
             TraceLowLevelEvent::Call(c) => {
                 if let Some(name) = fn_map.get(&c.function_id.0) {
+                    call_edges.push((active_calls.last().cloned(), name.clone()));
+                    active_calls.push(name.clone());
                     call_tree.push(("Call".to_string(), name.clone()));
                 }
             }
             TraceLowLevelEvent::Return(_) => {
+                active_calls.pop();
                 call_tree.push(("Return".to_string(), String::new()));
             }
             _ => {}
@@ -628,6 +635,8 @@ fn test_miden_call_tree_structure() {
         .collect();
 
     let expected_order = [
+        "#main",
+        "compute",
         "fibonacci",
         "factorial",
         "max_of_three",
@@ -667,6 +676,23 @@ fn test_miden_call_tree_structure() {
         }
     }
     assert_eq!(depth, 0, "call stack should be empty at end of trace");
+
+    assert!(
+        call_edges.iter().any(|(parent, child)| {
+            parent.as_deref().is_some_and(|p| p.ends_with("#main")) && child.ends_with("compute")
+        }),
+        "call tree should contain #main -> compute edge, got {:?}",
+        call_edges
+    );
+    for helper in &expected_order[2..] {
+        assert!(
+            call_edges.iter().any(|(parent, child)| {
+                parent.as_deref().is_some_and(|p| p.ends_with("compute")) && child.ends_with(helper)
+            }),
+            "call tree should contain compute -> {helper} edge, got {:?}",
+            call_edges
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,12 +1026,14 @@ fn observed_exit_sequence(doc: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// Reject any ValueRecord variant that is not `Int` so a future
-/// recorder change to a richer felt encoding (e.g. a typed `Felt`
-/// primitive or BigInt for out-of-range values) surfaces as a hard
-/// error rather than a silent decode loss.
+/// Reject any ValueRecord variant that is not part of the recorder's
+/// canonical MASM value contract: felts decode as `Int`, and the
+/// synthetic 4-felt `word` variable decodes as a `Sequence` of four
+/// `Int`s. A future change to a richer felt encoding (e.g. a typed
+/// `Felt` primitive or BigInt for out-of-range values) should surface as
+/// a hard error rather than a silent decode loss.
 fn assert_all_values_are_int(doc: &serde_json::Value) {
-    let check = |label: String, value: &serde_json::Value| {
+    let check_int = |label: String, value: &serde_json::Value| {
         assert_eq!(
             value["kind"].as_str(),
             Some("Int"),
@@ -1018,29 +1046,230 @@ fn assert_all_values_are_int(doc: &serde_json::Value) {
             "{label}: Int.i must be a signed integer; got {value}"
         );
     };
+    let check_value = |label: String, varname: &str, value: &serde_json::Value| {
+        if varname == "word" {
+            assert_eq!(
+                value["kind"].as_str(),
+                Some("Sequence"),
+                "{label} `word` should decode as Sequence; got {value}"
+            );
+            let elements = value["elements"].as_array().expect("Word.elements array");
+            assert_eq!(
+                elements.len(),
+                4,
+                "{label} `word` Sequence must have 4 elements; got {}",
+                elements.len()
+            );
+            for (idx, element) in elements.iter().enumerate() {
+                check_int(format!("{label} word[{idx}]"), element);
+            }
+        } else {
+            check_int(label, value);
+        }
+    };
     for ev in doc["events"].as_array().expect("events array") {
         match ev["kind"].as_str() {
             Some("call_entry") => {
                 for arg in ev["args"].as_array().into_iter().flatten() {
                     let n = arg["varname"].as_str().unwrap_or("?");
-                    check(format!("call_entry arg `{n}`"), &arg["value"]);
+                    check_value(format!("call_entry arg `{n}`"), n, &arg["value"]);
                 }
             }
             Some("step") => {
                 for v in ev["vars"].as_array().into_iter().flatten() {
                     let n = v["varname"].as_str().unwrap_or("?");
-                    check(format!("step var `{n}`"), &v["value"]);
+                    check_value(format!("step var `{n}`"), n, &v["value"]);
                 }
             }
             Some("call_exit") => {
                 let rv = &ev["return_value"];
                 if rv["kind"].as_str() != Some("Void") {
-                    check("call_exit return_value".into(), rv);
+                    check_int("call_exit return_value".into(), rv);
                 }
             }
             _ => {}
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// compute.masm — canonical MASM WDIO fixture
+// ---------------------------------------------------------------------------
+
+/// Records the canonical `compute.masm` fixture through the production
+/// recorder and pins the decoded calltrace shape that WDIO depends on:
+/// `#main -> compute -> helper`.  In particular, a calltrace search for
+/// `compute` must find the real `#exec::compute` call_entry, not only a
+/// pre-registered function-table row.
+#[test]
+fn test_compute_masm_calltrace_includes_compute_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_compute_masm_calltrace_includes_compute_via_ct_print_full",
+        "compute.masm",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+    assert_step_indices_monotonic(&doc);
+    assert_all_values_are_int(&doc);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let mut sorted_functions = functions.clone();
+    sorted_functions.sort_unstable();
+    assert_eq!(
+        sorted_functions,
+        vec![
+            "#exec::#main",
+            "#exec::arithmetic_demo",
+            "#exec::array_sum",
+            "#exec::bitwise_ops",
+            "#exec::compute",
+            "#exec::factorial",
+            "#exec::fibonacci",
+            "#exec::max_of_three",
+            "#exec::memory_word_ops",
+            "#exec::nested_control_flow",
+            "#exec::stack_manipulation",
+        ],
+        "function table should list compute, every helper, and #main"
+    );
+
+    let counts = &doc["counts"];
+    assert_eq!(
+        counts["steps"].as_u64(),
+        Some(185),
+        "steps; counts={counts}"
+    );
+    assert_eq!(counts["calls"].as_u64(), Some(12), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 185 step + 12 call_entry + 12 call_exit = 209.
+    assert_eq!(events.len(), 209, "events.len()");
+
+    let expected_call_sequence = vec![
+        "#exec::#main".to_string(),
+        "#exec::compute".to_string(),
+        "#exec::fibonacci".to_string(),
+        "#exec::factorial".to_string(),
+        "#exec::max_of_three".to_string(),
+        "#exec::array_sum".to_string(),
+        "#exec::bitwise_ops".to_string(),
+        "#exec::stack_manipulation".to_string(),
+        "#exec::nested_control_flow".to_string(),
+        "#exec::nested_control_flow".to_string(),
+        "#exec::arithmetic_demo".to_string(),
+        "#exec::memory_word_ops".to_string(),
+    ];
+    assert_eq!(observed_call_sequence(&doc), expected_call_sequence);
+
+    let search_matches: Vec<String> = observed_call_sequence(&doc)
+        .into_iter()
+        .filter(|function| function.contains("compute"))
+        .collect();
+    assert_eq!(
+        search_matches,
+        vec!["#exec::compute".to_string()],
+        "ct/search-calltrace compute should find the real compute call_entry"
+    );
+
+    let assert_parent =
+        |function: &str, call_key: i64, depth: i64, parent_call_key: i64, children: &[i64]| {
+            let entry = unique_call_entry(&doc, function);
+            assert_eq!(
+                entry["call_key"].as_i64(),
+                Some(call_key),
+                "{function} call_key"
+            );
+            assert_eq!(entry["depth"].as_i64(), Some(depth), "{function} depth");
+            assert_eq!(
+                entry["parent_call_key"].as_i64(),
+                Some(parent_call_key),
+                "{function} parent_call_key"
+            );
+            let observed_children: Vec<i64> = entry["children"]
+                .as_array()
+                .expect("children array")
+                .iter()
+                .map(|v| v.as_i64().expect("child call_key int"))
+                .collect();
+            assert_eq!(observed_children, children, "{function} children call_keys");
+        };
+
+    assert_parent("#exec::#main", 0, 0, -1, &[1]);
+    assert_parent("#exec::compute", 1, 1, 0, &[2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    for (function, call_key) in [
+        ("#exec::fibonacci", 2),
+        ("#exec::factorial", 3),
+        ("#exec::max_of_three", 4),
+        ("#exec::array_sum", 5),
+        ("#exec::bitwise_ops", 6),
+        ("#exec::stack_manipulation", 7),
+        ("#exec::arithmetic_demo", 10),
+        ("#exec::memory_word_ops", 11),
+    ] {
+        assert_parent(function, call_key, 2, 1, &[]);
+    }
+
+    let nested_entries: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| {
+            e["kind"] == "call_entry"
+                && e["function"].as_str() == Some("#exec::nested_control_flow")
+        })
+        .collect();
+    assert_eq!(
+        nested_entries.len(),
+        2,
+        "nested_control_flow is intentionally called twice"
+    );
+    for (entry, call_key) in nested_entries.iter().zip([8, 9]) {
+        assert_eq!(entry["call_key"].as_i64(), Some(call_key));
+        assert_eq!(entry["depth"].as_i64(), Some(2));
+        assert_eq!(entry["parent_call_key"].as_i64(), Some(1));
+    }
+
+    assert_eq!(
+        call_entry_args_s0_s3(unique_call_entry(&doc, "#exec::compute")),
+        [0, 0, 0, 0],
+        "compute entry is stack-neutral after the #main trace anchor"
+    );
+
+    let compute_exit_idx = events
+        .iter()
+        .position(|e| e["kind"] == "call_exit" && e["function"] == "#exec::compute")
+        .expect("compute call_exit");
+    let main_exit_idx = events
+        .iter()
+        .position(|e| e["kind"] == "call_exit" && e["function"] == "#exec::#main")
+        .expect("#main call_exit");
+    assert!(
+        compute_exit_idx < main_exit_idx,
+        "compute must close before #main so step-over can resume at #main"
+    );
+
+    let post_compute_main_lines: Vec<i64> = events[compute_exit_idx + 1..main_exit_idx]
+        .iter()
+        .filter(|e| e["kind"] == "step" && e["function"] == "#exec::#main")
+        .map(|e| e["line"].as_i64().expect("#main continuation step line"))
+        .collect();
+    let unique_post_compute_main_lines: HashSet<i64> =
+        post_compute_main_lines.iter().copied().collect();
+    assert!(
+        unique_post_compute_main_lines.len() > 1,
+        "DAP-visible step-over continuation after compute must expose multiple \
+         distinct #main source lines, got {post_compute_main_lines:?}"
+    );
 }
 
 /// Find the first step matching `predicate` and return the value of
