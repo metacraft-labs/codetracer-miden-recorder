@@ -351,20 +351,22 @@ fn test_recorded_trace_via_ct_print_json() {
     // backwards branch into the same source line so `repeat.N` bodies
     // surface one step per iteration (see
     // `test_control_flow_repeat_emits_step_per_iteration`).  For
-    // `compute.masm` that's a stable 182 step events and 12
+    // `compute.masm` that's a stable 185 step events and 12
     // call_entry events: one synthesised `#main` for the begin-block,
     // one real `compute` call frame, and 10 helper-procedure calls
     // below `compute` (the duplicate `nested_control_flow` is invoked
     // twice).  The two trace-anchor steps (`push.0 drop`) make the
     // `#main -> compute -> helper` calltrace visible without changing
-    // the operand stack.  These are stable properties of the canonical
+    // the operand stack.  The post-compute trace anchors keep DAP
+    // step-over on distinct same-depth #main source lines after the
+    // compute call returns.  These are stable properties of the canonical
     // fixture — if they change, that's a real regression to
     // investigate, not a flake.
     let counts = &doc["counts"];
     assert_eq!(
         counts["steps"].as_u64(),
-        Some(182),
-        "expected 182 step events for compute.masm; counts={counts}",
+        Some(185),
+        "expected 185 step events for compute.masm; counts={counts}",
     );
     assert_eq!(
         counts["calls"].as_u64(),

@@ -1143,7 +1143,7 @@ fn test_compute_masm_calltrace_includes_compute_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(
         counts["steps"].as_u64(),
-        Some(182),
+        Some(185),
         "steps; counts={counts}"
     );
     assert_eq!(counts["calls"].as_u64(), Some(12), "calls; counts={counts}");
@@ -1154,8 +1154,8 @@ fn test_compute_masm_calltrace_includes_compute_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 182 step + 12 call_entry + 12 call_exit = 206.
-    assert_eq!(events.len(), 206, "events.len()");
+    // 185 step + 12 call_entry + 12 call_exit = 209.
+    assert_eq!(events.len(), 209, "events.len()");
 
     let expected_call_sequence = vec![
         "#exec::#main".to_string(),
@@ -1243,6 +1243,32 @@ fn test_compute_masm_calltrace_includes_compute_via_ct_print_full() {
         call_entry_args_s0_s3(unique_call_entry(&doc, "#exec::compute")),
         [0, 0, 0, 0],
         "compute entry is stack-neutral after the #main trace anchor"
+    );
+
+    let compute_exit_idx = events
+        .iter()
+        .position(|e| e["kind"] == "call_exit" && e["function"] == "#exec::compute")
+        .expect("compute call_exit");
+    let main_exit_idx = events
+        .iter()
+        .position(|e| e["kind"] == "call_exit" && e["function"] == "#exec::#main")
+        .expect("#main call_exit");
+    assert!(
+        compute_exit_idx < main_exit_idx,
+        "compute must close before #main so step-over can resume at #main"
+    );
+
+    let post_compute_main_lines: Vec<i64> = events[compute_exit_idx + 1..main_exit_idx]
+        .iter()
+        .filter(|e| e["kind"] == "step" && e["function"] == "#exec::#main")
+        .map(|e| e["line"].as_i64().expect("#main continuation step line"))
+        .collect();
+    let unique_post_compute_main_lines: HashSet<i64> =
+        post_compute_main_lines.iter().copied().collect();
+    assert!(
+        unique_post_compute_main_lines.len() > 1,
+        "DAP-visible step-over continuation after compute must expose multiple \
+         distinct #main source lines, got {post_compute_main_lines:?}"
     );
 }
 
