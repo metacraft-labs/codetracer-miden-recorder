@@ -26,9 +26,10 @@ jobs:
           owner: metacraft-labs
 
       - name: Setup dev env
-        # setup-dev-env clones the siblings listed in .github/sibling-repos
-        # (codetracer-trace-format, codetracer-trace-format-nim) at the
-        # workspace-lock-pinned revisions before materialising the nix env.
+        # Pin the trace-format siblings used by the strict ct-print assertions
+        # below. The workspace lock currently resolves trace-format-nim to a
+        # newer reader whose call-exit tie-break semantics intentionally differ
+        # from the eec665b behavior this recorder's exact tests document.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
@@ -38,6 +39,9 @@ jobs:
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          siblings: |
+            codetracer-trace-format=a3036ae7fc7dd20921a30ccfac255469f2ecf301
+            codetracer-trace-format-nim=eec665bbd5bf9897f254801b3559ac56560dddbe
 
       - name: Build Nim trace writer library (sibling artifact)
         # TODO: replace with `direnv exec ../codetracer-trace-format-nim

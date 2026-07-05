@@ -76,13 +76,17 @@ jobs:
         # checkout at workspace-lock-pinned revisions. workflow_dispatch /
         # repository_dispatch ref inputs override the locked revision for
         # codetracer + the extension. CodeTracer defaults to a known-good
-        # published revision aligned with the lock-pinned trace-format siblings;
-        # dispatch inputs may still override it for compatibility testing.
+        # published revision. Its db-backend uses the source-backed stream
+        # reader APIs added after the CodeTracer flake lock's trace-format pin,
+        # so the Rust trace-format default is pinned to the matching published
+        # API commit; dispatch inputs may still override it for compatibility
+        # testing.
         # nix-blockchain-development is cloned bare (no override) for the
         # recorder_exec mcl-blockchain flake override patched in below.
-        # The CodeTracer and trace-format defaults are from the same
-        # CodeTracer flake lock; keeping them together avoids building
-        # one trace API against another.
+        # Keep these defaults together. Building CodeTracer d4179d7 against
+        # the older a3036ae trace-format pin fails before the integration tests
+        # can run because db-backend references the newer source-backed reader
+        # surface.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
@@ -95,7 +99,7 @@ jobs:
           siblings: |
             codetracer=${{ github.event.inputs.codetracer_ref || github.event.client_payload.codetracer_ref || 'd4179d7efc0d1fb5fd82b049843cab1ba435d4b7' }}
             codetracer-vscode-extension=${{ github.event.inputs.vscode_extension_ref || github.event.client_payload.vscode_extension_ref }}
-            codetracer-trace-format=${{ github.event.inputs.trace_format_ref || github.event.client_payload.trace_format_ref || 'a3036ae7fc7dd20921a30ccfac255469f2ecf301' }}
+            codetracer-trace-format=${{ github.event.inputs.trace_format_ref || github.event.client_payload.trace_format_ref || '9bdb07fa0a026e4494af60fbe9a45a8e4f1b3af3' }}
             codetracer-trace-format-nim=${{ github.event.inputs.trace_format_nim_ref || github.event.client_payload.trace_format_nim_ref || '839ed880c6340b9d1c4f81feb7f8e9e70b492956' }}
             nix-blockchain-development
 
