@@ -25,11 +25,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Build the binary if it isn't already built (cargo build is a no-op
-# when nothing has changed).  We use --quiet so the output of this
-# script stays focused on verification results.
-( cd "${REPO_ROOT}" && cargo build --locked --quiet )
+# when nothing has changed).  Some CI/dev shells set CARGO_TARGET_DIR,
+# so derive the binary path from the same target directory we pass to
+# Cargo instead of assuming `${REPO_ROOT}/target`.
+TARGET_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
+( cd "${REPO_ROOT}" && cargo build --locked --quiet --bin codetracer-miden-recorder --target-dir "${TARGET_DIR}" )
 
-BIN="${REPO_ROOT}/target/debug/codetracer-miden-recorder"
+PROFILE_DIR="${TARGET_DIR}/debug"
+if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
+  PROFILE_DIR="${TARGET_DIR}/${CARGO_BUILD_TARGET}/debug"
+fi
+
+BIN="${PROFILE_DIR}/codetracer-miden-recorder"
+if [[ ! -x "${BIN}" && -x "${BIN}.exe" ]]; then
+  BIN="${BIN}.exe"
+fi
 if [[ ! -x "${BIN}" ]]; then
   echo "ERROR: recorder binary not found at ${BIN}" >&2
   exit 1
