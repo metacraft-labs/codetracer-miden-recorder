@@ -44,19 +44,20 @@ jobs:
 
       - name: Setup dev env (windows-diy flavor)
         # setup-dev-env clones the siblings listed below at the
-        # workspace-lock-pinned revisions before materialising the env.
+        # pinned revisions before materialising the env.
         # The recorder's env.ps1 dot-sources `../codetracer/env.ps1`
         # for the shared CodeTracer toolchain, so `codetracer` is added
         # to the common trace-format build set via an explicit
-        # `siblings:` input.
+        # `siblings:` input. The trace-format pins match the nix/reprobuild
+        # lanes so ct-print semantics stay consistent across OSes.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: windows-diy
           gh-token: ${{ steps.app-token.outputs.token }}
           siblings: |
             codetracer
-            codetracer-trace-format
-            codetracer-trace-format-nim
+            codetracer-trace-format=a3036ae7fc7dd20921a30ccfac255469f2ecf301
+            codetracer-trace-format-nim=eec665bbd5bf9897f254801b3559ac56560dddbe
 
       - name: just build
         run: dev-exec just build

@@ -58,9 +58,9 @@ jobs:
           owner: metacraft-labs
 
       - name: Setup dev env (reprobuild flavor)
-        # setup-dev-env clones the siblings listed in .github/sibling-repos
-        # (codetracer-trace-format, codetracer-trace-format-nim) at the
-        # workspace-lock-pinned revisions before materialising the env.
+        # Keep the reprobuild lane on the same trace reader pair as the nix
+        # lane. The strict ct-print assertions in this repo pin the eec665b
+        # call-exit behavior rather than the newer workspace-lock reader.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: reprobuild
@@ -70,6 +70,9 @@ jobs:
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          siblings: |
+            codetracer-trace-format=a3036ae7fc7dd20921a30ccfac255469f2ecf301
+            codetracer-trace-format-nim=eec665bbd5bf9897f254801b3559ac56560dddbe
 
       - name: repro build
         # Builds the conventional `build` collection declared in
