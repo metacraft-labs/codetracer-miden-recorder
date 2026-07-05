@@ -41,7 +41,7 @@ jobs:
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
           siblings: |
             codetracer-trace-format=a3036ae7fc7dd20921a30ccfac255469f2ecf301
-            codetracer-trace-format-nim=4583561abd2d736bb84e1dc7e303fb657c65abf8
+            codetracer-trace-format-nim=3c6278217f771f788fb2b01834d8d7484b195934
 
       - name: Build Nim trace writer library (sibling artifact)
         # TODO: replace with `direnv exec ../codetracer-trace-format-nim
