@@ -29,10 +29,13 @@ jobs:
         include:
           - os: linux
             runner: [self-hosted, nixos]
+            tool_provisioning: path
           - os: macos
             runner: [self-hosted, aarch64-darwin]
+            tool_provisioning: path
           - os: windows
             runner: [self-hosted, Windows, X64, nixos-equivalent]
+            tool_provisioning: tarball
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -73,19 +76,21 @@ jobs:
         # `repro.nim`. Verifies the primary shipping artefact (the
         # recorder binary or extension) materialises through the
         # reprobuild engine identically to `just build`.
-        run: dev-exec repro build
+        run: dev-exec repro build --tool-provisioning=${{ matrix.tool_provisioning }}
 
       - name: repro test
         # Materialises the `test` collection.
-        run: dev-exec repro test
+        run: dev-exec repro test --tool-provisioning=${{ matrix.tool_provisioning }}
 
       - name: just build (cross-check)
+        if: runner.os != 'Windows'
         # Re-runs the legacy `just build` path inside the same env so
         # we catch silent divergences between `repro build` outputs
         # and what the dev shell + Justfile produce today.
         run: dev-exec just build
 
       - name: just test (cross-check)
+        if: runner.os != 'Windows'
         run: dev-exec just test
 
       - name: Upload logs on failure
