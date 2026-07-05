@@ -27,11 +27,13 @@ $ProgressPreference = "SilentlyContinue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 # --- 1. Shared CodeTracer toolchain -----------------------------------------
-# The blockchain recorders do not need FPC, LLVM, nargo, dotnet, or TTD/WinDbg;
-# skip those bootstrap/probe steps so activation is fast and does not depend on
-# debugger packages that this recorder never calls.
+# The blockchain recorders do not need FPC, GCC, LLVM, nargo, dotnet, or
+# TTD/WinDbg; skip those bootstrap/probe steps so activation is fast and does
+# not depend on debugger packages or C toolchains that this recorder never
+# calls.
 $env:WINDOWS_DIY_SKIP_TTD = "1"
 $env:WINDOWS_DIY_SKIP_FPC = "1"
+$env:WINDOWS_DIY_SKIP_GCC = "1"
 $env:WINDOWS_DIY_SKIP_LLVM = "1"
 $env:WINDOWS_DIY_SKIP_NARGO = "1"
 $env:WINDOWS_DIY_SKIP_DOTNET = "1"
