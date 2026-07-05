@@ -27,9 +27,9 @@ jobs:
 
       - name: Setup dev env
         # Pin the trace-format siblings used by the strict ct-print assertions
-        # below. The workspace lock currently resolves trace-format-nim to a
-        # newer reader whose call-exit tie-break semantics intentionally differ
-        # from the eec665b behavior this recorder's exact tests document.
+        # below. This reader revision has the current ValueRecord variant
+        # coverage while preserving the call-exit ordering this recorder's
+        # exact tests document.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
@@ -41,7 +41,7 @@ jobs:
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
           siblings: |
             codetracer-trace-format=a3036ae7fc7dd20921a30ccfac255469f2ecf301
-            codetracer-trace-format-nim=eec665bbd5bf9897f254801b3559ac56560dddbe
+            codetracer-trace-format-nim=4583561abd2d736bb84e1dc7e303fb657c65abf8
 
       - name: Build Nim trace writer library (sibling artifact)
         # TODO: replace with `direnv exec ../codetracer-trace-format-nim
