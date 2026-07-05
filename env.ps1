@@ -27,17 +27,30 @@ $ProgressPreference = "SilentlyContinue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 # --- 1. Shared CodeTracer toolchain -----------------------------------------
-# The blockchain recorders do not need FPC, GCC, LLVM, nargo, dotnet, or
-# TTD/WinDbg; skip those bootstrap/probe steps so activation is fast and does
-# not depend on debugger packages or C toolchains that this recorder never
+# The blockchain recorders only need Rust, Nim/nimble, just, Cap'n Proto,
+# MSVC, and bash for this Windows CI path. Skip the unrelated shared
+# CodeTracer language/tool bootstraps so activation is fast and does not
+# depend on debugger packages or archive extractors that this recorder never
 # calls.
 $env:WINDOWS_DIY_SKIP_TTD = "1"
+$env:WINDOWS_DIY_SKIP_NODE = "1"
+$env:WINDOWS_DIY_SKIP_UV = "1"
 $env:WINDOWS_DIY_SKIP_FPC = "1"
 $env:WINDOWS_DIY_SKIP_GCC = "1"
+$env:WINDOWS_DIY_SKIP_GNAT = "1"
+$env:WINDOWS_DIY_SKIP_GO = "1"
+$env:WINDOWS_DIY_SKIP_LDC = "1"
+$env:WINDOWS_DIY_SKIP_VLANG = "1"
+$env:WINDOWS_DIY_SKIP_ZSTD = "1"
 $env:WINDOWS_DIY_SKIP_LLVM = "1"
+$env:WINDOWS_DIY_SKIP_NEXTEST = "1"
+$env:WINDOWS_DIY_SKIP_TUP = "1"
 $env:WINDOWS_DIY_SKIP_NARGO = "1"
 $env:WINDOWS_DIY_SKIP_DOTNET = "1"
+$env:WINDOWS_DIY_SKIP_CT_REMOTE = "1"
 $env:WINDOWS_DIY_ENSURE_TTD = "0"
+$env:WINDOWS_DIY_ENSURE_DOTNET = "0"
+$env:WINDOWS_DIY_ENSURE_TREE_SITTER_NIM_PARSER = "0"
 $env:WINDOWS_DIY_SKIP_TTD_PROBE = "1"
 
 $codetracerEnv = Join-Path (Split-Path -Parent $scriptDir) "codetracer\env.ps1"
