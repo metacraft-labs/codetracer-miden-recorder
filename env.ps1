@@ -42,7 +42,8 @@ $env:WINDOWS_DIY_SKIP_GO = "1"
 $env:WINDOWS_DIY_SKIP_LDC = "1"
 $env:WINDOWS_DIY_SKIP_VLANG = "1"
 $env:WINDOWS_DIY_SKIP_ZLIB = "1"
-$env:WINDOWS_DIY_SKIP_ZSTD = "1"
+# Keep ZSTD enabled: the shared clingo bootstrap decompresses through zstd,
+# and the trace-writer FFI links against libzstd.
 $env:WINDOWS_DIY_SKIP_LLVM = "1"
 $env:WINDOWS_DIY_SKIP_NEXTEST = "1"
 $env:WINDOWS_DIY_SKIP_TUP = "1"
