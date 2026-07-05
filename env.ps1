@@ -44,6 +44,9 @@ $env:WINDOWS_DIY_SKIP_VLANG = "1"
 $env:WINDOWS_DIY_SKIP_ZLIB = "1"
 # Keep ZSTD enabled: the shared clingo bootstrap decompresses through zstd,
 # and the trace-writer FFI links against libzstd.
+# Install just after the shared env exports MSVC below; cargo install needs
+# link.exe for the msvc target.
+$env:WINDOWS_DIY_SKIP_JUST = "1"
 $env:WINDOWS_DIY_SKIP_LLVM = "1"
 $env:WINDOWS_DIY_SKIP_NEXTEST = "1"
 $env:WINDOWS_DIY_SKIP_TUP = "1"
@@ -71,6 +74,16 @@ if ($env:WINDOWS_DIY_CL_EXE -and (Test-Path $env:WINDOWS_DIY_CL_EXE)) {
     if ($env:Path -notlike "$msvcBin;*") {
         $env:Path = "$msvcBin;$($env:Path)"
     }
+}
+
+if (Get-Command Ensure-Just -ErrorAction SilentlyContinue) {
+    Ensure-Just -Root $installRoot -Toolchain $toolchain
+    $justExe = Join-Path ([Environment]::GetEnvironmentVariable("CARGO_HOME")) "bin\just.exe"
+    if (Test-Path $justExe) {
+        Set-Alias -Name "just" -Value $justExe -Scope Global
+    }
+} else {
+    throw "Shared CodeTracer env did not expose Ensure-Just."
 }
 
 Write-Host "codetracer-miden-recorder dev environment ready."
