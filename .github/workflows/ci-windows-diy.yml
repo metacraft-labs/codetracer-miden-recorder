@@ -23,11 +23,10 @@ on:
 jobs:
   windows-diy:
     name: Windows DIY — just build/test
-    # The shared CodeTracer Windows env requires the pinned Visual Studio
-    # Build Tools/MSVC toolchain for the Rust MSVC target. GitHub-hosted
-    # Windows images provide that host prerequisite; the current self-hosted
-    # nixos-equivalent runner is for reprobuild lanes and does not.
-    runs-on: windows-latest
+    # Private repos do not rely on GitHub-hosted Windows capacity. Use the
+    # same self-hosted Windows label as the reprobuild lane so the job reaches
+    # normal step logs instead of failing before runner assignment.
+    runs-on: [self-hosted, Windows, X64, nixos-equivalent]
     env:
       NIM_WINDOWS_SOURCE_MODE: prebuilt
       WINDOWS_DIY_SETUP_NODE_DEPS: "0"
