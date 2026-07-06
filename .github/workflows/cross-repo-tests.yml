@@ -119,7 +119,7 @@ jobs:
       - name: Build codetracer
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer"
-          OVERRIDE="--override-input codetracer-trace-format path:./libs/codetracer-trace-format"
+          OVERRIDE="--override-input codetracer-trace-format path:./libs/codetracer-trace-format --override-input codetracer-trace-format-nim path:../codetracer-trace-format-nim"
           # ``cache.metacraft-labs.com/metacraft-codetracer`` serves a stale
           # narinfo for the noir flake input keyed under a NAR-hash
           # that no longer matches the lockfile, so the build aborts
