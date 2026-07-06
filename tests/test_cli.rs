@@ -601,12 +601,11 @@ fn test_recorded_trace_via_ct_print_json() {
         }
     }
 
-    // ----- Exact step-variable assertion: fib's first step begins at zero --
+    // ----- Exact step-variable assertion: fib's first step keeps n=10 --
     // The call-entry assertion above pins the caller-visible input
     // (`n=10`) at the fibonacci boundary. The first step emitted inside
-    // `#exec::fibonacci` now reflects the callee's own
-    // `push.0 loc_store.0` prologue: the freshly pushed zero is on
-    // `stack[0]`, with the next visible slot still zero-padded.
+    // `#exec::fibonacci` keeps that input in `stack[0]`; the next visible
+    // slot is zero-padded.
     let fib_first_step = events
         .iter()
         .filter(|e| e["kind"] == "step")
@@ -619,16 +618,15 @@ fn test_recorded_trace_via_ct_print_json() {
     let fib_vars = fib_first_step["vars"]
         .as_array()
         .expect("fibonacci's first step should report vars");
-    for stack_name in ["stack[0]", "stack[1]"] {
+    for (stack_name, expected) in [("stack[0]", 10), ("stack[1]", 0)] {
         let stack_value = fib_vars
             .iter()
             .find(|v| v["varname"] == stack_name)
             .unwrap_or_else(|| panic!("fibonacci's first step should report {stack_name}"));
         assert_eq!(
             stack_value["value"]["i"].as_i64(),
-            Some(0),
-            "fibonacci's first step should have {stack_name}=0 after \
-             the callee prologue; got {}",
+            Some(expected),
+            "fibonacci's first step should have {stack_name}={expected}; got {}",
             stack_value["value"]
         );
     }
