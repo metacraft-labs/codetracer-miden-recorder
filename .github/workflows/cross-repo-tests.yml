@@ -140,16 +140,14 @@ jobs:
             if [ "$line" = "    codetracer-trace-format-nim = {" ]; then
               in_trace_nim=1
             elif [ "$in_trace_nim" = 1 ] && [ "$line" = "    };" ]; then
-              cat <<'EOF'
-    io-mon = {
-      url = "github:metacraft-labs/io-mon";
-      flake = false;
-    };
-    nim-stackable-hooks = {
-      url = "github:metacraft-labs/nim-stackable-hooks";
-      flake = false;
-    };
-EOF
+              printf '%s\n' '    io-mon = {'
+              printf '%s\n' '      url = "github:metacraft-labs/io-mon";'
+              printf '%s\n' '      flake = false;'
+              printf '%s\n' '    };'
+              printf '%s\n' '    nim-stackable-hooks = {'
+              printf '%s\n' '      url = "github:metacraft-labs/nim-stackable-hooks";'
+              printf '%s\n' '      flake = false;'
+              printf '%s\n' '    };'
               in_trace_nim=0
             fi
           done < flake.nix > flake.nix.tmp
