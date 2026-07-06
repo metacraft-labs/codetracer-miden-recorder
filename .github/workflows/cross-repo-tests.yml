@@ -124,24 +124,32 @@ jobs:
         # for codetracer-trace-format-nim reaches the Nim compiler directly.
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer"
-          awk '{
-            print
-            if ($0 == "            pkgs.libbpf") {
-              print "            pkgs.zstd"
-            }
-          }' nix/packages/default.nix > nix/packages/default.nix.tmp
+          while IFS= read -r line || [ -n "$line" ]; do
+            printf '%s\n' "$line"
+            if [ "$line" = "            pkgs.libbpf" ]; then
+              printf '%s\n' "            pkgs.zstd"
+            fi
+          done < nix/packages/default.nix > nix/packages/default.nix.tmp
           mv nix/packages/default.nix.tmp nix/packages/default.nix
-          awk '{
-            print
-            if ($0 == "              --mm:refc --hints:off --warnings:off \\") {
-              print "              --path:\"${inputs.codetracer-trace-format-nim}/src\" \\"
-              print "              --path:\"./libs/nim-stew/stew\" \\"
-              print "              --passC:\"-I${pkgs.zstd.dev}/include\" \\"
-              print "              --passL:\"-L${pkgs.zstd}/lib\" \\"
-            }
-          }' nix/packages/default.nix > nix/packages/default.nix.tmp
+          while IFS= read -r line || [ -n "$line" ]; do
+            printf '%s\n' "$line"
+            if [ "$line" = "              --mm:refc --hints:off --warnings:off \\" ]; then
+              printf '%s\n' '              --path:"${inputs.codetracer-trace-format-nim}/src" \'
+              printf '%s\n' '              --path:"./libs/nim-stew/stew" \'
+              printf '%s\n' '              --passC:"-I${pkgs.zstd.dev}/include" \'
+              printf '%s\n' '              --passL:"-L${pkgs.zstd}/lib" \'
+            fi
+          done < nix/packages/default.nix > nix/packages/default.nix.tmp
           mv nix/packages/default.nix.tmp nix/packages/default.nix
-          grep -n 'codetracer-trace-format-nim\|pkgs.zstd\|libs/nim-stew/stew' nix/packages/default.nix
+          line_no=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            line_no=$((line_no + 1))
+            case "$line" in
+              *codetracer-trace-format-nim*|*pkgs.zstd*|*libs/nim-stew/stew*)
+                printf '%s:%s\n' "$line_no" "$line"
+                ;;
+            esac
+          done < nix/packages/default.nix
 
       - name: Build codetracer
         run: |
