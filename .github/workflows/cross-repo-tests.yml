@@ -109,9 +109,8 @@ jobs:
 
       - name: Provide CodeTracer CI-only sibling libs
         # The CodeTracer checkout doesn't ship all workspace siblings used by
-        # this PR's pinned build. Copy the cloned siblings into paths under the
-        # checkout so they are part of the Nix source tree passed to the
-        # sandboxed build.
+        # this PR's pinned build. Copy the cloned siblings into predictable
+        # local flake-input paths under the checkout before the Nix build.
         run: |
           copy_sibling() {
             local name="$1"
@@ -135,6 +134,26 @@ jobs:
         # reach the Nim compiler directly.
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer"
+          in_trace_nim=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            printf '%s\n' "$line"
+            if [ "$line" = "    codetracer-trace-format-nim = {" ]; then
+              in_trace_nim=1
+            elif [ "$in_trace_nim" = 1 ] && [ "$line" = "    };" ]; then
+              cat <<'EOF'
+    io-mon = {
+      url = "github:metacraft-labs/io-mon";
+      flake = false;
+    };
+    nim-stackable-hooks = {
+      url = "github:metacraft-labs/nim-stackable-hooks";
+      flake = false;
+    };
+EOF
+              in_trace_nim=0
+            fi
+          done < flake.nix > flake.nix.tmp
+          mv flake.nix.tmp flake.nix
           while IFS= read -r line || [ -n "$line" ]; do
             printf '%s\n' "$line"
             if [ "$line" = "            pkgs.libbpf" ]; then
@@ -147,8 +166,8 @@ jobs:
             if [ "$line" = "              --mm:refc --hints:off --warnings:off \\" ]; then
               printf '%s\n' '              --path:"${inputs.codetracer-trace-format-nim}/src" \'
               printf '%s\n' '              --path:"./libs/nim-stew/stew" \'
-              printf '%s\n' '              --path:"./libs/io-mon/src" \'
-              printf '%s\n' '              --path:"./libs/nim-stackable-hooks/src" \'
+              printf '%s\n' '              --path:"${inputs.io-mon}/src" \'
+              printf '%s\n' '              --path:"${inputs.nim-stackable-hooks}/src" \'
               printf '%s\n' '              --passC:"-I${pkgs.zstd.dev}/include" \'
               printf '%s\n' '              --passL:"-L${pkgs.zstd}/lib" \'
             fi
@@ -158,7 +177,7 @@ jobs:
           while IFS= read -r line || [ -n "$line" ]; do
             line_no=$((line_no + 1))
             case "$line" in
-              *codetracer-trace-format-nim*|*pkgs.zstd*|*libs/nim-stew/stew*|*libs/io-mon/src*|*libs/nim-stackable-hooks/src*)
+              *codetracer-trace-format-nim*|*pkgs.zstd*|*libs/nim-stew/stew*|*inputs.io-mon*|*inputs.nim-stackable-hooks*)
                 printf '%s:%s\n' "$line_no" "$line"
                 ;;
             esac
@@ -167,7 +186,7 @@ jobs:
       - name: Build codetracer
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer"
-          OVERRIDE="--override-input codetracer-trace-format path:./libs/codetracer-trace-format --override-input codetracer-trace-format-nim path:../codetracer-trace-format-nim"
+          OVERRIDE="--override-input codetracer-trace-format path:./libs/codetracer-trace-format --override-input codetracer-trace-format-nim path:../codetracer-trace-format-nim --override-input io-mon path:./libs/io-mon --override-input nim-stackable-hooks path:./libs/nim-stackable-hooks"
           # ``cache.metacraft-labs.com/metacraft-codetracer`` serves a stale
           # narinfo for the noir flake input keyed under a NAR-hash
           # that no longer matches the lockfile, so the build aborts
