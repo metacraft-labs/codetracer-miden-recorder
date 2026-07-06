@@ -107,25 +107,32 @@ jobs:
             nim-stackable-hooks=13eeb0a11a7a0d769d44cfd5bbce3644f2b067b9
             nix-blockchain-development
 
-      - name: Provide codetracer-trace-format into codetracer/libs (CI override)
-        # The codetracer Build step below uses
-        # ``--override-input codetracer-trace-format
-        # path:./libs/codetracer-trace-format``.  The codetracer
-        # checkout doesn't ship that directory, so we copy the
-        # sibling (already cloned at the lock-pinned revision by
-        # setup-dev-env) into the expected path before nix build.
+      - name: Provide CodeTracer CI-only sibling libs
+        # The CodeTracer checkout doesn't ship all workspace siblings used by
+        # this PR's pinned build. Copy the cloned siblings into paths under the
+        # checkout so they are part of the Nix source tree passed to the
+        # sandboxed build.
         run: |
-          SRC="$GITHUB_WORKSPACE/../codetracer-trace-format"
-          DEST="$GITHUB_WORKSPACE/../codetracer/libs/codetracer-trace-format"
-          rm -rf "$DEST"
-          cp -a "$SRC" "$DEST"
+          copy_sibling() {
+            local name="$1"
+            local src="$GITHUB_WORKSPACE/../$name"
+            local dest="$GITHUB_WORKSPACE/../codetracer/libs/$name"
+            rm -rf "$dest"
+            cp -a "$src" "$dest"
+          }
 
-      - name: Patch codetracer Nix ct_test trace-format-nim paths
+          copy_sibling codetracer-trace-format
+          copy_sibling io-mon
+          copy_sibling nim-stackable-hooks
+
+      - name: Patch codetracer Nix ct_test sibling paths
         # The pinned codetracer package builds ``src/ct/codetracer.nim`` as the
         # main module, so ``src/ct_test/config.nims`` is not loaded early enough
-        # to add the seekable-reader package paths used by the ct_test imports.
+        # to add the seekable-reader and io-mon package paths used by the
+        # ct_test imports.
         # Patch the cloned checkout before ``nix build`` so the flake override
-        # for codetracer-trace-format-nim reaches the Nim compiler directly.
+        # for codetracer-trace-format-nim and the copied workspace siblings
+        # reach the Nim compiler directly.
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer"
           while IFS= read -r line || [ -n "$line" ]; do
@@ -140,6 +147,8 @@ jobs:
             if [ "$line" = "              --mm:refc --hints:off --warnings:off \\" ]; then
               printf '%s\n' '              --path:"${inputs.codetracer-trace-format-nim}/src" \'
               printf '%s\n' '              --path:"./libs/nim-stew/stew" \'
+              printf '%s\n' '              --path:"./libs/io-mon/src" \'
+              printf '%s\n' '              --path:"./libs/nim-stackable-hooks/src" \'
               printf '%s\n' '              --passC:"-I${pkgs.zstd.dev}/include" \'
               printf '%s\n' '              --passL:"-L${pkgs.zstd}/lib" \'
             fi
@@ -149,7 +158,7 @@ jobs:
           while IFS= read -r line || [ -n "$line" ]; do
             line_no=$((line_no + 1))
             case "$line" in
-              *codetracer-trace-format-nim*|*pkgs.zstd*|*libs/nim-stew/stew*)
+              *codetracer-trace-format-nim*|*pkgs.zstd*|*libs/nim-stew/stew*|*libs/io-mon/src*|*libs/nim-stackable-hooks/src*)
                 printf '%s:%s\n' "$line_no" "$line"
                 ;;
             esac
