@@ -116,6 +116,33 @@ jobs:
           rm -rf "$DEST"
           cp -a "$SRC" "$DEST"
 
+      - name: Patch codetracer Nix ct_test trace-format-nim paths
+        # The pinned codetracer package builds ``src/ct/codetracer.nim`` as the
+        # main module, so ``src/ct_test/config.nims`` is not loaded early enough
+        # to add the seekable-reader package paths used by the ct_test imports.
+        # Patch the cloned checkout before ``nix build`` so the flake override
+        # for codetracer-trace-format-nim reaches the Nim compiler directly.
+        run: |
+          cd "$GITHUB_WORKSPACE/../codetracer"
+          awk '{
+            print
+            if ($0 == "            pkgs.libbpf") {
+              print "            pkgs.zstd"
+            }
+          }' nix/packages/default.nix > nix/packages/default.nix.tmp
+          mv nix/packages/default.nix.tmp nix/packages/default.nix
+          awk '{
+            print
+            if ($0 == "              --mm:refc --hints:off --warnings:off \\") {
+              print "              --path:\"${inputs.codetracer-trace-format-nim}/src\" \\"
+              print "              --path:\"./libs/nim-stew/stew\" \\"
+              print "              --passC:\"-I${pkgs.zstd.dev}/include\" \\"
+              print "              --passL:\"-L${pkgs.zstd}/lib\" \\"
+            }
+          }' nix/packages/default.nix > nix/packages/default.nix.tmp
+          mv nix/packages/default.nix.tmp nix/packages/default.nix
+          grep -n 'codetracer-trace-format-nim\|pkgs.zstd\|libs/nim-stew/stew' nix/packages/default.nix
+
       - name: Build codetracer
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer"
