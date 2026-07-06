@@ -8,6 +8,8 @@
 #     codetracer-miden-recorder/                      <-- this repo (checked out)
 #     codetracer/                    <-- cloned (for ct binary)
 #     codetracer-vscode-extension/   <-- cloned (test harness + fixtures)
+#     io-mon/                        <-- cloned (ct_test io_mon import)
+#     nim-stackable-hooks/           <-- cloned (io-mon hook backend import)
 
 name: Cross-Repo Integration Tests
 
@@ -101,6 +103,8 @@ jobs:
             codetracer-vscode-extension=${{ github.event.inputs.vscode_extension_ref || github.event.client_payload.vscode_extension_ref }}
             codetracer-trace-format=${{ github.event.inputs.trace_format_ref || github.event.client_payload.trace_format_ref || '9bdb07fa0a026e4494af60fbe9a45a8e4f1b3af3' }}
             codetracer-trace-format-nim=${{ github.event.inputs.trace_format_nim_ref || github.event.client_payload.trace_format_nim_ref || '839ed880c6340b9d1c4f81feb7f8e9e70b492956' }}
+            io-mon=451eb2d664eb996b5a66815fd6decf7dae34be32
+            nim-stackable-hooks=13eeb0a11a7a0d769d44cfd5bbce3644f2b067b9
             nix-blockchain-development
 
       - name: Provide codetracer-trace-format into codetracer/libs (CI override)
