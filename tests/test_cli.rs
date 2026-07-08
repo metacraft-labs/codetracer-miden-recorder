@@ -602,11 +602,17 @@ fn test_recorded_trace_via_ct_print_json() {
     }
 
     // ----- Exact step-variable assertion: fib's first step has n=10 --
-    // The very first step inside `#exec::fibonacci` (its line-279
-    // entry, just after the `push.10 exec.fibonacci` call site) must
-    // surface `stack[0] = 10`.  This anchors the test to the source
-    // program: changing `push.10` to `push.11` in the fixture's
-    // `begin` block would fail this assertion.
+    // The very first step inside `#exec::fibonacci` is its opening
+    // `push.0 loc_store.0` (procedure body line).  The recorder samples
+    // each asmop at cycle_idx==1, i.e. AFTER the issuing op's first
+    // cycle: the leading `push.0` has already landed a 0 on the operand
+    // top, so the input `n=10` (the caller's `push.10` at the call
+    // site) sits one slot below at `stack[1]`, with `stack[0]==0` the
+    // just-pushed accumulator seed.  This still anchors the test to the
+    // source program: changing `push.10` to `push.11` in the fixture's
+    // `begin` block would fail this assertion.  (The call boundary
+    // itself stages `n` unambiguously as the `s1` call-arg — asserted
+    // in the call-args table above.)
     let fib_first_step = events
         .iter()
         .filter(|e| e["kind"] == "step")
@@ -616,16 +622,16 @@ fn test_recorded_trace_via_ct_print_json() {
                 .is_some_and(|f| f.ends_with("::fibonacci"))
         })
         .expect("expected at least one step inside fibonacci");
-    let fib_stack0 = fib_first_step["vars"]
+    let fib_stack1 = fib_first_step["vars"]
         .as_array()
-        .and_then(|vs| vs.iter().find(|v| v["varname"] == "stack[0]"))
-        .expect("fibonacci's first step should report stack[0]");
+        .and_then(|vs| vs.iter().find(|v| v["varname"] == "stack[1]"))
+        .expect("fibonacci's first step should report stack[1]");
     assert_eq!(
-        fib_stack0["value"]["i"].as_i64(),
+        fib_stack1["value"]["i"].as_i64(),
         Some(10),
         "fibonacci's first step should see the input `n=10` on \
-         stack[0]; got {}",
-        fib_stack0["value"]
+         stack[1] (below the just-pushed accumulator seed); got {}",
+        fib_stack1["value"]
     );
 }
 
