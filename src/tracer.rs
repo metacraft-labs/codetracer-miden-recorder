@@ -375,6 +375,25 @@ impl MidenTracer {
         // add a dedicated `AdviceRead` variant to `EventLogKind`.
         let mut pending_advice_read: Option<String> = None;
 
+        // The most recent operand-stack top (`stack[0]`) observed at a
+        // processed asmop boundary.  When a callee returns, Miden's
+        // `call`/`syscall`/`dyncall` convention restores the caller's
+        // context with the top 16 operand-stack elements shared across
+        // the boundary, so the callee leaves its result at `stack[0]`
+        // for the caller to consume (see Miden's
+        // `execution_contexts.md`: "The top 16 elements of the stack
+        // can be used to pass parameters and return values between the
+        // caller and the callee").  At the call->return transition
+        // boundary the recorder re-observes that value FROM THE
+        // CALLER'S FRAME by attaching it as the `register_return`
+        // value, so the caller's view of the callee's returned
+        // operand-stack result is preserved even when the caller's next
+        // asmop is a consuming op (`drop`, the next `push`).  Captured
+        // at the END of each processed asmop so at the return boundary
+        // it holds the callee's final after-state result.  `None` when
+        // the returning context left an empty operand stack.
+        let mut last_stack_top: Option<i64> = None;
+
         for result in vm_state_iter {
             let state: VmState = match result {
                 Ok(s) => s,
@@ -578,7 +597,27 @@ impl MidenTracer {
                     if context_stack.last().map(|s| s.as_str()) == Some(&context_name) {
                         // Returning from prev_ctx back to the context on top of stack.
                         context_stack.pop();
-                        let ret_val = NONE_VALUE;
+                        // Re-observe the callee's operand-stack result FROM
+                        // THE CALLER'S FRAME at the call->return transition
+                        // boundary.  Miden has no return registers: a called
+                        // procedure leaves its result at `stack[0]` on the
+                        // shared operand stack (the top 16 elements are
+                        // restored to the caller across the `call`/`syscall`/
+                        // `dyncall` boundary -- see Miden's
+                        // `execution_contexts.md`).  `last_stack_top` holds
+                        // the callee's final after-state `stack[0]` captured
+                        // at the end of its last processed asmop (the caller's
+                        // current asmop has not updated it yet).  Attaching it
+                        // as the return value surfaces the caller seeing the
+                        // returned value even when the caller's next op
+                        // consumes it (`drop`, the next `push`).
+                        let ret_val = match last_stack_top {
+                            Some(i) => ValueRecord::Int {
+                                i,
+                                type_id: felt_type_id,
+                            },
+                            None => NONE_VALUE,
+                        };
                         TraceWriter::register_return(&mut *self.writer, ret_val);
                     } else if synthesised_chain_leaf
                         && bare_proc_name(&context_name) == "#main"
@@ -753,6 +792,20 @@ impl MidenTracer {
                 };
                 TraceWriter::register_variable_with_full_value(&mut *self.writer, &name, value);
             }
+
+            // Capture the current operand-stack top for the call->return
+            // boundary re-observation above.  On the iteration where a
+            // callee's context yields back to the caller, this still
+            // holds the callee's final after-state `stack[0]` (the
+            // caller's asmop that triggers the return detection is
+            // processed at the TOP of the loop, before this line runs
+            // again), so the return value the caller sees is the value
+            // the callee left on the shared operand stack.
+            last_stack_top = if !state.stack.is_empty() {
+                Some(state.stack[0].as_int() as i64)
+            } else {
+                None
+            };
 
             // -- Emit Word value at a mem_loadw / loc_loadw -------------------------------
             // The recorder normally observes VM state at

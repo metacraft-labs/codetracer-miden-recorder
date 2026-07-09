@@ -5709,6 +5709,59 @@ fn test_cross_context_call_test_via_ct_print_full() {
     );
 }
 
+/// Class-(B) transition-boundary return-value re-observation.
+///
+/// Miden has no return registers: a called procedure leaves its result
+/// on the *shared operand stack* for the caller to consume.  Per Miden's
+/// `call`/`syscall`/`dyncall` convention the top 16 operand-stack
+/// elements are restored to the caller across the boundary, so the
+/// callee's result lives at `stack[0]` when control returns to the
+/// caller (see Miden's `execution_contexts.md`: "The top 16 elements of
+/// the stack can be used to pass parameters and return values between
+/// the caller and the callee").
+///
+/// This test pins that the recorder re-observes that result FROM THE
+/// CALLER'S FRAME at the call->return transition boundary — the
+/// `call_exit` for the callee carries the returned operand-stack value
+/// (777) even though the caller's next asmop (`drop drop`) immediately
+/// consumes it.  Before the transition-boundary re-observation the
+/// `call_exit.return_value` was `Void` and the caller's post-return step
+/// no longer showed the value, so the caller's view of the callee's
+/// return value was missing.
+#[test]
+fn test_cross_context_call_return_value_reobserved_at_boundary() {
+    let Some((doc, _source_path)) = record_and_dump_full(
+        "test_cross_context_call_return_value_reobserved_at_boundary",
+        "cross_context_call_test.masm",
+    ) else {
+        return;
+    };
+
+    // Locate the callee's `call_exit`.  The callee closes at the
+    // call->return boundary before `#main` continues with `drop drop`.
+    let callee_exit = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .find(|e| e["kind"] == "call_exit" && e["function"].as_str() == Some("#exec::callee"))
+        .expect("expected a call_exit for #exec::callee");
+
+    let rv = &callee_exit["return_value"];
+    assert_eq!(
+        rv["kind"].as_str(),
+        Some("Int"),
+        "the callee's return value must be re-observed at the transition \
+         boundary (physically the callee's operand-stack result, logically \
+         the caller's return value); got return_value = {rv}",
+    );
+    assert_eq!(
+        rv["i"].as_i64(),
+        Some(777),
+        "the caller must re-observe the callee's operand-stack result (777) \
+         at the call->return boundary; got return_value = {rv}",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // transaction_note_consume_test.masm -- canonical Miden tx note consumption
 // ---------------------------------------------------------------------------
