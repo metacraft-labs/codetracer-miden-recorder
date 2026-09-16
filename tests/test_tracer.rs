@@ -970,6 +970,29 @@ fn record_and_dump_full(test_name: &str, program: &str) -> Option<(serde_json::V
     Some((doc, source_path))
 }
 
+// ---------------------------------------------------------------------
+// The `<toplevel>` root frame
+// ---------------------------------------------------------------------
+//
+// Every function-table and call-sequence expectation below includes a
+// `<toplevel>` entry.  It is not a MASM procedure: the trace writer's
+// `start(path, line)` registers a `<toplevel>` function and opens its
+// frame at depth 0 so the recording has a root for its call tree, as
+// prescribed by `codetracer-trace-format-spec/trace-events.md`
+// §"Recorder Integration — Starting a Recording".
+//
+// Concretely, for every recording:
+//
+// * `<toplevel>` is the first entry in the function table (the tests
+//   that compare a *sorted* table see it between the `#`-prefixed
+//   assembler names and the `std::` stdlib names, since `<` sorts
+//   after `#` and before `s`),
+// * its `call_entry` is the first call event and its `call_exit` the
+//   last, so the call count includes it and the event count includes
+//   both (+2 events),
+// * it contributes **no** step — `start` emits the entry step at
+//   `(path, line)` regardless — so step counts are unaffected.
+
 /// Assert `metadata.program` ends with the source filename.
 fn assert_metadata_program_ends_with(doc: &serde_json::Value, source_path: &Path) {
     let prog = doc["metadata"]["program"]
@@ -1147,6 +1170,7 @@ fn test_control_flow_test_via_ct_print_full() {
             "#exec::if_else_demo",
             "#exec::repeat_acc",
             "#exec::while_sum",
+            "<toplevel>", // root frame opened by `start`
         ],
         "function table mismatch — has the assembler renamed the synthetic prefix?"
     );
@@ -1158,7 +1182,8 @@ fn test_control_flow_test_via_ct_print_full() {
     // `test_control_flow_repeat_emits_step_per_iteration`).
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(31), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -1171,8 +1196,9 @@ fn test_control_flow_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 31 steps + 4 call_entry + 4 call_exit = 39 events.
-    assert_eq!(events.len(), 39, "events.len()");
+    // 31 steps + 5 call_entry + 5 call_exit = 41 events.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 41, "events.len()");
 
     // ----- Call entry sequence ----------------------------------------
     // `#main` is registered first as a synthesised call (the begin-
@@ -1183,6 +1209,9 @@ fn test_control_flow_test_via_ct_print_full() {
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::if_else_demo".to_string(),
             "#exec::while_sum".to_string(),
@@ -1201,6 +1230,8 @@ fn test_control_flow_test_via_ct_print_full() {
             "#exec::while_sum".to_string(),
             "#exec::repeat_acc".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -1370,6 +1401,10 @@ fn test_control_flow_call_exit_strict_lifo() {
             "#exec::while_sum".to_string(),
             "#exec::repeat_acc".to_string(),
             "#exec::#main".to_string(),
+            // The `<toplevel>` root frame `start` opens is the
+            // outermost frame, so strict LIFO closes it last — see the
+            // note above.
+            "<toplevel>".to_string(),
         ],
     );
 }
@@ -1445,6 +1480,7 @@ fn test_nested_calls_test_via_ct_print_full() {
             "#exec::inner",
             "#exec::middle",
             "#exec::outer",
+            "<toplevel>", // root frame opened by `start`
         ],
         "function table should list every declared procedure plus `#main`"
     );
@@ -1459,7 +1495,8 @@ fn test_nested_calls_test_via_ct_print_full() {
     // `#main` is NOT a call_entry: it surfaces only for the cleanup
     // `drop` and the special drain branch closes the inlined chain
     // back to toplevel without emitting a `register_call(#main)`.
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -1467,8 +1504,9 @@ fn test_nested_calls_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 5 step + 4 call_entry + 4 call_exit = 13.
-    assert_eq!(events.len(), 13, "events.len()");
+    // 5 step + 5 call_entry + 5 call_exit = 15.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 15, "events.len()");
 
     // Both call_entry and call_exit appear in entry-key order
     // (outermost first) after upstream codetracer-trace-format-nim
@@ -1486,6 +1524,9 @@ fn test_nested_calls_test_via_ct_print_full() {
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::compute".to_string(),
             "#exec::outer".to_string(),
             "#exec::middle".to_string(),
@@ -1513,6 +1554,8 @@ fn test_nested_calls_test_via_ct_print_full() {
             "#exec::middle".to_string(),
             "#exec::outer".to_string(),
             "#exec::compute".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -1556,16 +1599,20 @@ fn test_nested_calls_full_chain_registered() {
         "#exec::middle",
         "#exec::inner",
         "#exec::#main",
+        // The `<toplevel>` root frame `start` opens — see the note above.
+        "<toplevel>",
     ] {
         assert!(
             functions.contains(&want),
             "expected function `{want}` in registered table; got {functions:?}"
         );
     }
+    // 4 program calls (compute → outer → middle → inner) + the
+    // `<toplevel>` root frame.
     assert_eq!(
         observed_call_sequence(&doc).len(),
-        4,
-        "expected 4 call_entry events for compute → outer → middle → inner"
+        5,
+        "expected 5 call_entry events: <toplevel> + compute → outer → middle → inner"
     );
 }
 
@@ -1601,14 +1648,21 @@ fn test_memory_ops_test_via_ct_print_full() {
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
     assert_eq!(
+        // `<toplevel>` is the root frame `start` opens — see the note above.
         sorted_functions,
-        vec!["#exec::#main", "#exec::mem_reader", "#exec::mem_writer"],
+        vec![
+            "#exec::#main",
+            "#exec::mem_reader",
+            "#exec::mem_writer",
+            "<toplevel>"
+        ],
         "function table should list every declared procedure plus `#main`"
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -1616,12 +1670,18 @@ fn test_memory_ops_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 13 step + 2 call_entry + 2 call_exit = 17.
-    assert_eq!(events.len(), 17, "events.len()");
+    // 13 step + 3 call_entry + 3 call_exit = 19.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 19, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["#exec::mem_reader".to_string(), "#exec::#main".to_string()],
+        // `<toplevel>` is the root frame `start` opens, entered first — see the note above.
+        vec![
+            "<toplevel>".to_string(),
+            "#exec::mem_reader".to_string(),
+            "#exec::#main".to_string(),
+        ],
     );
     // call_exit ordering is LIFO after upstream codetracer-trace-format-nim
     // 2cd1a10 ("LIFO ordering for same-step call_exit events"): both
@@ -1633,7 +1693,12 @@ fn test_memory_ops_test_via_ct_print_full() {
     // `mem_reader` (key 0).
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["#exec::#main".to_string(), "#exec::mem_reader".to_string()],
+        vec![
+            "#exec::#main".to_string(),
+            "#exec::mem_reader".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
+        ],
     );
 
     // ----- mem_writer effect: each push.N appears as stack[0]=N ------
@@ -1755,14 +1820,16 @@ fn test_assertions_pass_test_via_ct_print_full() {
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
     assert_eq!(
+        // `<toplevel>` is the root frame `start` opens — see the note above.
         sorted_functions,
-        vec!["#exec::#main", "#exec::checks"],
+        vec!["#exec::#main", "#exec::checks", "<toplevel>"],
         "function table should list every declared procedure plus `#main`"
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(6), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(1), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -1770,8 +1837,9 @@ fn test_assertions_pass_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 6 step + 1 call_entry + 1 call_exit = 8.
-    assert_eq!(events.len(), 8, "events.len()");
+    // 6 step + 2 call_entry + 2 call_exit = 10.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 10, "events.len()");
 
     // ----- The 999 marker must appear as stack[0] in the post-asserts step
     // After all three assertions and `push.999`, the next snapshotted
@@ -1862,14 +1930,18 @@ fn test_assertion_fail_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["#exec::boom"],
+        // This table is compared in writer-assignment order, so the
+        // `<toplevel>` root frame `start` opens comes first — see the
+        // note above.
+        vec!["<toplevel>", "#exec::boom"],
         "failing assert should still register the calling procedure; \
          got {functions:?}"
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(2), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(0), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(1),
@@ -1877,8 +1949,9 @@ fn test_assertion_fail_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 2 step + 0 call + 0 exit + 1 io = 3 events.
-    assert_eq!(events.len(), 3, "events.len()");
+    // 2 step + 1 call + 1 exit + 1 io = 5 events.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 5, "events.len()");
 
     // ----- The single io_event must be an `ioError` carrying the
     // canonical "assertion failed" payload from the Miden VM.
@@ -1984,14 +2057,16 @@ fn test_stack_manip_test_via_ct_print_full() {
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
     assert_eq!(
+        // `<toplevel>` is the root frame `start` opens — see the note above.
         sorted_functions,
-        vec!["#exec::#main", "#exec::shuffle"],
+        vec!["#exec::#main", "#exec::shuffle", "<toplevel>"],
         "function table should list every declared procedure plus `#main`"
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(1), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -1999,8 +2074,9 @@ fn test_stack_manip_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 13 step + 1 call_entry + 1 call_exit = 15.
-    assert_eq!(events.len(), 15, "events.len()");
+    // 13 step + 2 call_entry + 2 call_exit = 17.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 17, "events.len()");
 
     // ----- Initial 4-deep build: stack[0..4] = [4,3,2,1] at line 10 ---
     // After `push.1 push.2 push.3 push.4` the recorder snapshots the
@@ -2148,12 +2224,14 @@ fn test_mast_inlining_test_via_ct_print_full() {
             "#exec::three",
             "#exec::two",
             "#exec::wrapper",
+            "<toplevel>", // root frame opened by `start`
         ],
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(7), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(6), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -2161,8 +2239,9 @@ fn test_mast_inlining_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 7 step + 5 call_entry + 5 call_exit = 17.
-    assert_eq!(events.len(), 17, "events.len()");
+    // 7 step + 6 call_entry + 6 call_exit = 19.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 19, "events.len()");
 
     // Both call_entry and call_exit appear in entry-key order
     // (outermost first) after upstream codetracer-trace-format-nim
@@ -2176,6 +2255,9 @@ fn test_mast_inlining_test_via_ct_print_full() {
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::wrapper".to_string(),
             "#exec::three".to_string(),
             "#exec::two".to_string(),
@@ -2198,6 +2280,8 @@ fn test_mast_inlining_test_via_ct_print_full() {
             "#exec::two".to_string(),
             "#exec::three".to_string(),
             "#exec::wrapper".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -2270,13 +2354,20 @@ fn test_loop_iteration_test_via_ct_print_full() {
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
     assert_eq!(
+        // `<toplevel>` is the root frame `start` opens — see the note above.
         sorted_functions,
-        vec!["#exec::#main", "#exec::repeat_three", "#exec::while_three"],
+        vec![
+            "#exec::#main",
+            "#exec::repeat_three",
+            "#exec::while_three",
+            "<toplevel>"
+        ],
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(21), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -2284,12 +2375,16 @@ fn test_loop_iteration_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 21 step + 3 call_entry + 3 call_exit = 27.
-    assert_eq!(events.len(), 27, "events.len()");
+    // 21 step + 4 call_entry + 4 call_exit = 29.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 29, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::repeat_three".to_string(),
             "#exec::while_three".to_string(),
@@ -2301,6 +2396,8 @@ fn test_loop_iteration_test_via_ct_print_full() {
             "#exec::repeat_three".to_string(),
             "#exec::while_three".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -2383,13 +2480,15 @@ fn test_proc_call_syscall_test_via_ct_print_full() {
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
     assert_eq!(
+        // `<toplevel>` is the root frame `start` opens — see the note above.
         sorted_functions,
-        vec!["#exec::#main", "#exec::inner", "#exec::outer"],
+        vec!["#exec::#main", "#exec::inner", "#exec::outer", "<toplevel>"],
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(6), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -2397,12 +2496,16 @@ fn test_proc_call_syscall_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 6 step + 3 call_entry + 3 call_exit = 12.
-    assert_eq!(events.len(), 12, "events.len()");
+    // 6 step + 4 call_entry + 4 call_exit = 14.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 14, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::outer".to_string(),
             "#exec::inner".to_string(),
@@ -2414,6 +2517,8 @@ fn test_proc_call_syscall_test_via_ct_print_full() {
             "#exec::inner".to_string(),
             "#exec::outer".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -2508,12 +2613,19 @@ fn test_memory_word_ops_test_via_ct_print_full() {
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
     assert_eq!(
+        // `<toplevel>` is the root frame `start` opens — see the note above.
         sorted_functions,
-        vec!["#exec::#main", "#exec::word_reader", "#exec::word_writer"],
+        vec![
+            "#exec::#main",
+            "#exec::word_reader",
+            "#exec::word_writer",
+            "<toplevel>"
+        ],
     );
 
     let counts = &doc["counts"];
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -2523,6 +2635,9 @@ fn test_memory_word_ops_test_via_ct_print_full() {
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered
+            // before the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::word_writer".to_string(),
             "#exec::word_reader".to_string(),
@@ -2608,10 +2723,15 @@ fn test_local_word_ops_test_via_ct_print_full() {
         .collect();
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
-    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::word_local"],);
+    // `<toplevel>` is the root frame `start` opens — see the note above.
+    assert_eq!(
+        sorted_functions,
+        vec!["#exec::#main", "#exec::word_local", "<toplevel>"],
+    );
 
     let counts = &doc["counts"];
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -2620,7 +2740,13 @@ fn test_local_word_ops_test_via_ct_print_full() {
 
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["#exec::#main".to_string(), "#exec::word_local".to_string()],
+        // The `<toplevel>` root frame `start` opens is entered before
+        // the program runs — see the note above.
+        vec![
+            "<toplevel>".to_string(),
+            "#exec::#main".to_string(),
+            "#exec::word_local".to_string()
+        ],
     );
 
     // ----- Find the `word` Sequence value -----------------------------
@@ -2724,12 +2850,16 @@ fn test_assertion_error_codes_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         functions,
-        vec!["#exec::boom"],
+        // This table is compared in writer-assignment order, so the
+        // `<toplevel>` root frame `start` opens comes first — see the
+        // note above.
+        vec!["<toplevel>", "#exec::boom"],
         "failing assertz aborts before #main is observed",
     );
 
     let counts = &doc["counts"];
-    assert_eq!(counts["calls"].as_u64(), Some(0), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(1),
@@ -2897,12 +3027,14 @@ fn test_u32_arithmetic_test_via_ct_print_full() {
             "#exec::overflow_ops",
             "#exec::shift_ops",
             "#exec::wrap_ops",
+            "<toplevel>", // root frame opened by `start`
         ],
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(6), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -2911,7 +3043,8 @@ fn test_u32_arithmetic_test_via_ct_print_full() {
 
     // 13 step + 5 call_entry + 5 call_exit = 23.
     let events = doc["events"].as_array().expect("events array");
-    assert_eq!(events.len(), 23, "events.len()");
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 25, "events.len()");
 
     // The four wrapper procedures are siblings under `#main`; the
     // recorder's caller_invokes_both detection closes each one
@@ -2920,6 +3053,9 @@ fn test_u32_arithmetic_test_via_ct_print_full() {
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::wrap_ops".to_string(),
             "#exec::overflow_ops".to_string(),
@@ -2935,6 +3071,8 @@ fn test_u32_arithmetic_test_via_ct_print_full() {
             "#exec::bitwise_ops".to_string(),
             "#exec::shift_ops".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -3035,12 +3173,14 @@ fn test_boolean_predicates_test_via_ct_print_full() {
             "#exec::not_op",
             "#exec::or_op",
             "#exec::xor_op",
+            "<toplevel>", // root frame opened by `start`
         ],
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(11), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(12), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -3048,8 +3188,9 @@ fn test_boolean_predicates_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 13 step + 11 call_entry + 11 call_exit = 35.
-    assert_eq!(events.len(), 35, "events.len()");
+    // 13 step + 12 call_entry + 12 call_exit = 37.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 37, "events.len()");
 
     // Each predicate procedure runs in source order and the
     // recorder closes each one before opening the next (sibling
@@ -3057,6 +3198,9 @@ fn test_boolean_predicates_test_via_ct_print_full() {
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::not_op".to_string(),
             "#exec::and_op".to_string(),
@@ -3084,6 +3228,8 @@ fn test_boolean_predicates_test_via_ct_print_full() {
             "#exec::lte_op".to_string(),
             "#exec::gte_op".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -3180,11 +3326,16 @@ fn test_stack_manipulation_test_via_ct_print_full() {
         .collect();
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
-    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::shuffle"]);
+    // `<toplevel>` is the root frame `start` opens — see the note above.
+    assert_eq!(
+        sorted_functions,
+        vec!["#exec::#main", "#exec::shuffle", "<toplevel>"]
+    );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(13), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -3192,16 +3343,27 @@ fn test_stack_manipulation_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 13 step + 2 call_entry + 2 call_exit = 17.
-    assert_eq!(events.len(), 17, "events.len()");
+    // 13 step + 3 call_entry + 3 call_exit = 19.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 19, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["#exec::#main".to_string(), "#exec::shuffle".to_string()],
+        // `<toplevel>` is the root frame `start` opens, entered first — see the note above.
+        vec![
+            "<toplevel>".to_string(),
+            "#exec::#main".to_string(),
+            "#exec::shuffle".to_string(),
+        ],
     );
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["#exec::shuffle".to_string(), "#exec::#main".to_string()],
+        vec![
+            "#exec::shuffle".to_string(),
+            "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
+        ],
     );
 
     // ----- Strict per-line stack-shape pinning -----------------------
@@ -3343,11 +3505,16 @@ fn test_large_field_literal_test_via_ct_print_full() {
         .collect();
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
-    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::lits"]);
+    // `<toplevel>` is the root frame `start` opens — see the note above.
+    assert_eq!(
+        sorted_functions,
+        vec!["#exec::#main", "#exec::lits", "<toplevel>"]
+    );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(6), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -3355,16 +3522,27 @@ fn test_large_field_literal_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 6 step + 2 call_entry + 2 call_exit = 10.
-    assert_eq!(events.len(), 10, "events.len()");
+    // 6 step + 3 call_entry + 3 call_exit = 12.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 12, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["#exec::#main".to_string(), "#exec::lits".to_string()],
+        // `<toplevel>` is the root frame `start` opens, entered first — see the note above.
+        vec![
+            "<toplevel>".to_string(),
+            "#exec::#main".to_string(),
+            "#exec::lits".to_string(),
+        ],
     );
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["#exec::lits".to_string(), "#exec::#main".to_string()],
+        vec![
+            "#exec::lits".to_string(),
+            "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
+        ],
     );
 
     // ----- Step-by-step strict pin of every literal --------------------
@@ -3411,7 +3589,13 @@ fn test_large_field_literal_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(types, vec!["felt", "Word", "type_0"]);
+    // TWO types, because the recorder registers two: `felt` and `Word`
+    // (`src/tracer.rs`). The third entry this used to pin, `type_0`, was
+    // ct-print's fallback name for an id with no record behind it — the
+    // writer handed out type ids from a private counter that had drifted from
+    // the `types.dat` record count, so the table advertised one more type than
+    // it held. The drift is fixed; the phantom is gone.
+    assert_eq!(types, vec!["felt", "Word"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -3505,6 +3689,7 @@ fn test_stdlib_imports_test_via_ct_print_full() {
             "#exec::#main",
             "#exec::add_op",
             "#exec::mul_op",
+            "<toplevel>", // root frame opened by `start`
             "std::math::u64::overflowing_add",
             "std::math::u64::wrapping_add",
             "std::math::u64::wrapping_mul",
@@ -3514,7 +3699,8 @@ fn test_stdlib_imports_test_via_ct_print_full() {
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(19), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(7), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(8), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -3532,6 +3718,9 @@ fn test_stdlib_imports_test_via_ct_print_full() {
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered
+            // before the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::add_op".to_string(),
             "std::math::u64::overflowing_add".to_string(),
@@ -3562,6 +3751,8 @@ fn test_stdlib_imports_test_via_ct_print_full() {
             "std::math::u64::overflowing_add".to_string(),
             "#exec::add_op".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -3640,7 +3831,13 @@ fn test_stdlib_imports_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(types, vec!["felt", "Word", "type_0"]);
+    // TWO types, because the recorder registers two: `felt` and `Word`
+    // (`src/tracer.rs`). The third entry this used to pin, `type_0`, was
+    // ct-print's fallback name for an id with no record behind it — the
+    // writer handed out type ids from a private counter that had drifted from
+    // the `types.dat` record count, so the table advertised one more type than
+    // it held. The drift is fixed; the phantom is gone.
+    assert_eq!(types, vec!["felt", "Word"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -3702,12 +3899,14 @@ fn test_field_arithmetic_test_via_ct_print_full() {
             "#exec::neg_one",
             "#exec::pow2_op",
             "#exec::sub_wrap",
+            "<toplevel>", // root frame opened by `start`
         ],
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(11), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(9), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(10), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -3715,12 +3914,16 @@ fn test_field_arithmetic_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 11 step + 9 call_entry + 9 call_exit = 29.
-    assert_eq!(events.len(), 29, "events.len()");
+    // 11 step + 10 call_entry + 10 call_exit = 31.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 31, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::add_wrap".to_string(),
             "#exec::sub_wrap".to_string(),
@@ -3744,6 +3947,8 @@ fn test_field_arithmetic_test_via_ct_print_full() {
             "#exec::pow2_op".to_string(),
             "#exec::exp_op".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -3838,7 +4043,13 @@ fn test_field_arithmetic_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(types, vec!["felt", "Word", "type_0"]);
+    // TWO types, because the recorder registers two: `felt` and `Word`
+    // (`src/tracer.rs`). The third entry this used to pin, `type_0`, was
+    // ct-print's fallback name for an id with no record behind it — the
+    // writer handed out type ids from a private counter that had drifted from
+    // the `types.dat` record count, so the table advertised one more type than
+    // it held. The drift is fixed; the phantom is gone.
+    assert_eq!(types, vec!["felt", "Word"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -3882,12 +4093,17 @@ fn test_if_else_branch_test_via_ct_print_full() {
         .collect();
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
-    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::branch"]);
+    // `<toplevel>` is the root frame `start` opens — see the note above.
+    assert_eq!(
+        sorted_functions,
+        vec!["#exec::#main", "#exec::branch", "<toplevel>"]
+    );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(9), "steps; counts={counts}");
     // 3 calls: synthesised #main + the two `exec.branch` invocations.
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -3895,12 +4111,16 @@ fn test_if_else_branch_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 9 step + 3 call_entry + 3 call_exit = 15.
-    assert_eq!(events.len(), 15, "events.len()");
+    // 9 step + 4 call_entry + 4 call_exit = 17.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 17, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::branch".to_string(),
             "#exec::branch".to_string(),
@@ -3912,6 +4132,8 @@ fn test_if_else_branch_test_via_ct_print_full() {
             "#exec::branch".to_string(),
             "#exec::branch".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -4076,11 +4298,16 @@ fn test_local_frame_decl_test_via_ct_print_full() {
         .collect();
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
-    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::compute"]);
+    // `<toplevel>` is the root frame `start` opens — see the note above.
+    assert_eq!(
+        sorted_functions,
+        vec!["#exec::#main", "#exec::compute", "<toplevel>"]
+    );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(11), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -4088,16 +4315,27 @@ fn test_local_frame_decl_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 11 step + 2 call_entry + 2 call_exit = 15.
-    assert_eq!(events.len(), 15, "events.len()");
+    // 11 step + 3 call_entry + 3 call_exit = 17.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 17, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["#exec::#main".to_string(), "#exec::compute".to_string()],
+        // `<toplevel>` is the root frame `start` opens, entered first — see the note above.
+        vec![
+            "<toplevel>".to_string(),
+            "#exec::#main".to_string(),
+            "#exec::compute".to_string(),
+        ],
     );
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["#exec::compute".to_string(), "#exec::#main".to_string()],
+        vec![
+            "#exec::compute".to_string(),
+            "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
+        ],
     );
 
     // ----- After all four loc_store.N, line 40 carries all 4 locals --
@@ -4294,6 +4532,7 @@ fn test_hash_primitives_test_via_ct_print_full() {
             "#exec::hash_op",
             "#exec::hmerge_op",
             "#exec::hperm_op",
+            "<toplevel>", // root frame opened by `start`
         ],
     );
 
@@ -4305,7 +4544,8 @@ fn test_hash_primitives_test_via_ct_print_full() {
     // RPO round expansion lives inside ONE call_entry / call_exit
     // pair.  A regression that surfaces per-round call_entries
     // would push this count well above 4.
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -4313,12 +4553,16 @@ fn test_hash_primitives_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 12 step + 4 call_entry + 4 call_exit = 20.
-    assert_eq!(events.len(), 20, "events.len()");
+    // 12 step + 5 call_entry + 5 call_exit = 22.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 22, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::hash_op".to_string(),
             "#exec::hperm_op".to_string(),
@@ -4332,6 +4576,8 @@ fn test_hash_primitives_test_via_ct_print_full() {
             "#exec::hperm_op".to_string(),
             "#exec::hmerge_op".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -4462,14 +4708,21 @@ fn test_advice_tape_test_via_ct_print_full() {
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
     assert_eq!(
+        // `<toplevel>` is the root frame `start` opens — see the note above.
         sorted_functions,
-        vec!["#exec::#main", "#exec::loadw_op", "#exec::tape_reader"],
+        vec![
+            "#exec::#main",
+            "#exec::loadw_op",
+            "#exec::tape_reader",
+            "<toplevel>"
+        ],
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(8), "steps; counts={counts}");
     // 3 calls: synthesised #main + tape_reader + loadw_op.
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     // 4 io_events: 3 adv_push reads inside tape_reader + 1
     // adv_loadw inside loadw_op.  A regression that drops the
     // event emission would push this to 0; an over-emission (e.g.
@@ -4481,12 +4734,16 @@ fn test_advice_tape_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 8 step + 3 call_entry + 3 call_exit + 4 io = 18.
-    assert_eq!(events.len(), 18, "events.len()");
+    // 8 step + 4 call_entry + 4 call_exit + 4 io = 20.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 20, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::tape_reader".to_string(),
             "#exec::loadw_op".to_string(),
@@ -4762,6 +5019,7 @@ fn test_falcon_signature_test_via_ct_print_full() {
     assert_eq!(
         sorted_functions,
         vec![
+            "<toplevel>", // root frame opened by `start`
             "std::crypto::dsa::rpo_falcon512::compute_s1_norm_sq",
             "std::crypto::dsa::rpo_falcon512::compute_s2_norm_sq",
             "std::crypto::dsa::rpo_falcon512::diff_mod_M",
@@ -4923,13 +5181,15 @@ fn test_transaction_account_storage_test_via_ct_print_full() {
             "#exec::#main",
             "#exec::account_get_item",
             "#exec::account_set_item",
+            "<toplevel>", // root frame opened by `start`
         ],
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(20), "steps; counts={counts}");
     // 1 (#main) + 2 (set_item) + 3 (get_item) = 6 calls.
-    assert_eq!(counts["calls"].as_u64(), Some(6), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(7), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -4937,12 +5197,16 @@ fn test_transaction_account_storage_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 20 step + 6 call_entry + 6 call_exit = 32.
-    assert_eq!(events.len(), 32, "events.len()");
+    // 20 step + 7 call_entry + 7 call_exit = 34.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 34, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::account_set_item".to_string(),
             "#exec::account_set_item".to_string(),
@@ -4960,6 +5224,8 @@ fn test_transaction_account_storage_test_via_ct_print_full() {
             "#exec::account_get_item".to_string(),
             "#exec::account_get_item".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -4971,7 +5237,15 @@ fn test_transaction_account_storage_test_via_ct_print_full() {
     // top of the caller's stack (for get_item).
     let call_entries: Vec<&serde_json::Value> = events
         .iter()
-        .filter(|e| e["kind"] == "call_entry" && e["function"].as_str() != Some("#exec::#main"))
+        // Both synthetic frames are excluded so the indices below line up
+        // with the user procedures: `#exec::#main` is the assembler's
+        // begin-block context, and `<toplevel>` is the call tree's root
+        // that `start` opens — see the note above.
+        .filter(|e| {
+            e["kind"] == "call_entry"
+                && e["function"].as_str() != Some("#exec::#main")
+                && e["function"].as_str() != Some("<toplevel>")
+        })
         .collect();
     assert_eq!(
         call_entries.len(),
@@ -5118,12 +5392,14 @@ fn test_transaction_kernel_syscall_test_via_ct_print_full() {
             "#exec::#main",
             "#sys::kernel_add_one",
             "#sys::kernel_get_block_number",
+            "<toplevel>", // root frame opened by `start`
         ],
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(8), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -5131,12 +5407,16 @@ fn test_transaction_kernel_syscall_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 8 step + 3 call_entry + 3 call_exit = 14.
-    assert_eq!(events.len(), 14, "events.len()");
+    // 8 step + 4 call_entry + 4 call_exit = 16.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 16, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#sys::kernel_get_block_number".to_string(),
             "#sys::kernel_add_one".to_string(),
@@ -5148,6 +5428,8 @@ fn test_transaction_kernel_syscall_test_via_ct_print_full() {
             "#sys::kernel_get_block_number".to_string(),
             "#sys::kernel_add_one".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -5247,9 +5529,7 @@ fn test_transaction_kernel_syscall_test_via_ct_print_full() {
     // step rather than an unobserved `#main` location.
     let add_body_step = events
         .iter()
-        .filter(|e| {
-            e["kind"] == "step" && e["function"].as_str() == Some("#sys::kernel_add_one")
-        })
+        .filter(|e| e["kind"] == "step" && e["function"].as_str() == Some("#sys::kernel_add_one"))
         .next_back()
         .expect("expected a step inside kernel_add_one");
     let stack0_after_add: Vec<i64> = add_body_step["vars"]
@@ -5324,12 +5604,14 @@ fn test_merkle_tree_test_via_ct_print_full() {
             "#exec::mtree_get_op",
             "#exec::mtree_set_op",
             "#exec::mtree_verify_op",
+            "<toplevel>", // root frame opened by `start`
         ],
     );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(39), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -5337,12 +5619,16 @@ fn test_merkle_tree_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 39 step + 4 call_entry + 4 call_exit = 47.
-    assert_eq!(events.len(), 47, "events.len()");
+    // 39 step + 5 call_entry + 5 call_exit = 49.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 49, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::mtree_get_op".to_string(),
             "#exec::mtree_verify_op".to_string(),
@@ -5357,6 +5643,8 @@ fn test_merkle_tree_test_via_ct_print_full() {
             "#exec::mtree_verify_op".to_string(),
             "#exec::mtree_set_op".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -5535,12 +5823,17 @@ fn test_cross_context_call_test_via_ct_print_full() {
         .collect();
     let mut sorted_functions = functions.clone();
     sorted_functions.sort_unstable();
-    assert_eq!(sorted_functions, vec!["#exec::#main", "#exec::callee"]);
+    // `<toplevel>` is the root frame `start` opens — see the note above.
+    assert_eq!(
+        sorted_functions,
+        vec!["#exec::#main", "#exec::callee", "<toplevel>"]
+    );
 
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(12), "steps; counts={counts}");
     // 2 calls: synthesised #main + cross-context call.callee.
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -5548,17 +5841,28 @@ fn test_cross_context_call_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 12 step + 2 call_entry + 2 call_exit = 16.
-    assert_eq!(events.len(), 16, "events.len()");
+    // 12 step + 3 call_entry + 3 call_exit = 18.
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 18, "events.len()");
 
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["#exec::#main".to_string(), "#exec::callee".to_string()],
+        // `<toplevel>` is the root frame `start` opens, entered first — see the note above.
+        vec![
+            "<toplevel>".to_string(),
+            "#exec::#main".to_string(),
+            "#exec::callee".to_string(),
+        ],
     );
     // Strict LIFO: the callee closes before #main.
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["#exec::callee".to_string(), "#exec::#main".to_string()],
+        vec![
+            "#exec::callee".to_string(),
+            "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
+        ],
     );
 
     // ----- Cross-context boundary: caller's top felt at the call -----
@@ -5821,6 +6125,7 @@ fn test_transaction_note_consume_test_via_ct_print_full() {
             "#exec::note_recv",
             "#exec::note_store",
             "#exec::note_unwrap",
+            "<toplevel>", // root frame opened by `start`
         ],
     );
 
@@ -5828,7 +6133,8 @@ fn test_transaction_note_consume_test_via_ct_print_full() {
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(27), "steps; counts={counts}");
     // 1 (#main) + 3 * 3 (per-note recv/unwrap/store) = 10 calls.
-    assert_eq!(counts["calls"].as_u64(), Some(10), "calls; counts={counts}");
+    // Includes the `<toplevel>` root frame `start` opens — see the note above.
+    assert_eq!(counts["calls"].as_u64(), Some(11), "calls; counts={counts}");
     // 9 io_events: 3 `adv_push.1` reads per note, 3 notes = 9.  A
     // regression that drops the event emission would push this to
     // 0; an over-emission (e.g. firing on every cycle) would push
@@ -5842,7 +6148,8 @@ fn test_transaction_note_consume_test_via_ct_print_full() {
     // ----- Total event tally ------------------------------------------
     // 27 step + 10 call_entry + 10 call_exit + 9 io = 56.
     let events = doc["events"].as_array().expect("events array");
-    assert_eq!(events.len(), 56, "events.len()");
+    // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
+    assert_eq!(events.len(), 58, "events.len()");
 
     // ----- Per-note call/exit interleave ------------------------------
     // The driver calls receive -> unwrap -> store, three times.
@@ -5852,6 +6159,9 @@ fn test_transaction_note_consume_test_via_ct_print_full() {
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            // The `<toplevel>` root frame `start` opens is entered before
+            // the program runs — see the note above.
+            "<toplevel>".to_string(),
             "#exec::#main".to_string(),
             "#exec::note_recv".to_string(),
             "#exec::note_unwrap".to_string(),
@@ -5877,6 +6187,8 @@ fn test_transaction_note_consume_test_via_ct_print_full() {
             "#exec::note_unwrap".to_string(),
             "#exec::note_store".to_string(),
             "#exec::#main".to_string(),
+            // `<toplevel>` is the outermost frame, so LIFO closes it last — see the note above.
+            "<toplevel>".to_string(),
         ],
     );
 
@@ -5946,7 +6258,15 @@ fn test_transaction_note_consume_test_via_ct_print_full() {
     //     the procedure).
     let call_entries: Vec<&serde_json::Value> = events
         .iter()
-        .filter(|e| e["kind"] == "call_entry" && e["function"].as_str() != Some("#exec::#main"))
+        // Both synthetic frames are excluded so the indices below line up
+        // with the user procedures: `#exec::#main` is the assembler's
+        // begin-block context, and `<toplevel>` is the call tree's root
+        // that `start` opens — see the note above.
+        .filter(|e| {
+            e["kind"] == "call_entry"
+                && e["function"].as_str() != Some("#exec::#main")
+                && e["function"].as_str() != Some("<toplevel>")
+        })
         .collect();
     assert_eq!(
         call_entries.len(),

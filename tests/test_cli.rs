@@ -349,19 +349,26 @@ fn test_recorded_trace_via_ct_print_json() {
     // backwards branch into the same source line so `repeat.N` bodies
     // surface one step per iteration (see
     // `test_control_flow_repeat_emits_step_per_iteration`).  For
-    // `compute.masm` that's a stable 180 step events and 11
-    // call_entry events: one synthesised `#main` for the begin-block
-    // (registered when `#main` is the first observed context — see
-    // `test_control_flow_call_exit_strict_lifo`) plus 10 user-procedure
-    // calls (the assembler dispatches each procedure once, with
-    // sibling collapse closing each before the next opens; the
-    // duplicate `nested_control_flow` is invoked twice from the
-    // begin-block).  The two extra steps over the pre-iteration-fix
-    // baseline come from the single-line `repeat.3` body in
-    // `nested_control_flow` (line 196 emits 3 steps now instead of
-    // 1).  These are stable properties of the canonical fixture — if
+    // `compute.masm` that's a stable 180 step events and 12
+    // call_entry events: the `<toplevel>` root frame, one synthesised
+    // `#main` for the begin-block (registered when `#main` is the first
+    // observed context — see `test_control_flow_call_exit_strict_lifo`)
+    // plus 10 user-procedure calls (the assembler dispatches each
+    // procedure once, with sibling collapse closing each before the
+    // next opens; the duplicate `nested_control_flow` is invoked twice
+    // from the begin-block).  The two extra steps over the
+    // pre-iteration-fix baseline come from the single-line `repeat.3`
+    // body in `nested_control_flow` (line 196 emits 3 steps now instead
+    // of 1).  These are stable properties of the canonical fixture — if
     // they change, that's a real regression to investigate, not a
     // flake.
+    //
+    // `<toplevel>` is not a MASM procedure: the writer's
+    // `start(path, line)` registers a `<toplevel>` function and opens
+    // its frame at depth 0 so the recording has a root for its call
+    // tree — see `trace-events.md` §"Recorder Integration — Starting a
+    // Recording".  It contributes a call but no step, so the step count
+    // is unaffected by it.
     let counts = &doc["counts"];
     assert_eq!(
         counts["steps"].as_u64(),
@@ -370,16 +377,17 @@ fn test_recorded_trace_via_ct_print_json() {
     );
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(11),
-        "expected 11 call events for compute.masm; counts={counts}",
+        Some(12),
+        "expected 12 call events for compute.masm; counts={counts}",
     );
 
     let events = doc["events"].as_array().expect("events array");
 
     // ----- Call sequence: every call_entry now resolves to a named
     // procedure.  The `begin` block dispatches procedures in this
-    // exact order.  The first event is the synthesised `#main` (see
-    // `test_control_flow_call_exit_strict_lifo`); the remaining 10
+    // exact order.  The first event is the `<toplevel>` root frame the
+    // writer's `start` opens; the second is the synthesised `#main`
+    // (see `test_control_flow_call_exit_strict_lifo`); the remaining 10
     // entries are the user procedures observed in source order, with
     // siblings (max_of_three → array_sum, bitwise_ops →
     // stack_manipulation, arithmetic_demo → memory_word_ops) handled
@@ -391,6 +399,7 @@ fn test_recorded_trace_via_ct_print_json() {
         .filter_map(|e| e["function"].as_str())
         .collect();
     let expected_call_sequence: &[&str] = &[
+        "<toplevel>",
         "::#main",
         "::fibonacci",
         "::factorial",
