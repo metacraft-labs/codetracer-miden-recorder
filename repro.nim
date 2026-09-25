@@ -70,6 +70,7 @@
 ## the bundled Miden VM crate, no external Miden assembler is needed.
 
 import repro_project_dsl
+import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
 
 package codetracer_miden_recorder:
@@ -119,6 +120,9 @@ package codetracer_miden_recorder:
     name: "codetracer-miden-recorder"
 
   devEnv:
+    when not defined(windows):
+      useFlakeDevShell()
+
     activity "default"
 
   build:
