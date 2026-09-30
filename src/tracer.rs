@@ -8,7 +8,6 @@ use std::path::Path;
 
 use codetracer_trace_types::{EventLogKind, FunctionId, Line, NONE_VALUE, TypeKind, ValueRecord};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
-use codetracer_trace_writer_nim::{TraceEventsFileFormat, create_trace_writer};
 use eyre::{Context, Result, eyre};
 use miden_assembly::Assembler;
 use miden_core::crypto::merkle::{MerkleStore, MerkleTree};
@@ -18,14 +17,11 @@ use miden_processor::{
 };
 use miden_stdlib::StdLibrary;
 
+// The on-disk container produced by the recorder is always the canonical
+// multi-stream CTFS bundle (`Recorder-CLI-Conventions.md` §4 in
+// `codetracer-specs`): `line_counted_writer` pins it.
+use crate::line_counts::{LineCountedPaths, line_counted_writer};
 use crate::source_map::SourceMap;
-
-/// The on-disk container produced by the recorder is always the canonical
-/// multi-stream CTFS bundle.  Pre-2026-05-08 the recorder accepted a
-/// `TraceEventsFileFormat` parameter and the CLI exposed a `--format` flag;
-/// the convention now mandates CTFS-only output (see
-/// `Recorder-CLI-Conventions.md` §4 in `codetracer-specs`).
-const TRACE_FORMAT: TraceEventsFileFormat = TraceEventsFileFormat::Ctfs;
 
 /// The main tracer struct that captures Miden VM execution traces.
 pub struct MidenTracer {
@@ -50,9 +46,6 @@ impl MidenTracer {
     /// `ct print` (from `codetracer-trace-format-nim`) for human-readable
     /// conversion of the produced bundle.
     pub fn trace_program(source_path: &Path, source_code: &str, out_dir: &Path) -> Result<()> {
-        let program_str = source_path.to_string_lossy();
-        let writer = create_trace_writer(&program_str, &[], TRACE_FORMAT);
-
         // Initialise output files.
         std::fs::create_dir_all(out_dir)
             .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
@@ -62,10 +55,16 @@ impl MidenTracer {
         // is exposed.
         let events_path = out_dir.join("trace.bin");
 
-        Self::trace_program_with_writer(source_path, source_code, writer, |w| {
-            TraceWriter::begin_writing_trace_events(w, &events_path).map_err(|e| eyre!("{e}"))?;
-            Ok(())
-        })?;
+        // The writer states the program file's real line count in
+        // `paths.dat`, so it opens its event streams here: the table can
+        // only be enabled on an open writer, and the file must be registered
+        // before `start` names it. The program file is the only path the
+        // recorder's steps and functions name.
+        let program_str = source_path.to_string_lossy();
+        let mut writer = line_counted_writer(&program_str, &events_path)?;
+        LineCountedPaths::default().register(&mut writer, source_path, source_code)?;
+
+        Self::trace_program_with_writer(source_path, source_code, Box::new(writer), |_w| Ok(()))?;
         Ok(())
     }
 

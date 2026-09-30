@@ -5,6 +5,7 @@
 
 pub mod client_replay;
 pub mod kernel_procs;
+pub mod line_counts;
 pub mod mockchain;
 pub mod recorder;
 pub mod rust_support;
