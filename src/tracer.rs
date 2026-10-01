@@ -3,7 +3,7 @@
 //! Steps through a Miden program using `execute_iter` and emits
 //! CodeTracer trace events (steps, calls, returns, variables).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use codetracer_trace_types::{EventLogKind, FunctionId, Line, NONE_VALUE, TypeKind, ValueRecord};
@@ -306,8 +306,14 @@ impl MidenTracer {
         // `test_control_flow_repeat_emits_step_per_iteration`.
         let mut step_first_op: Option<String> = None;
         let mut step_moved_past_first: bool = false;
-        // Track which local memory slots have been written.
-        let mut active_locals: HashMap<u32, ()> = HashMap::new();
+        // Local slots of the current frame that a `loc_store.N` has
+        // written. Only those are reported: an unwritten slot holds
+        // whatever an earlier frame left at that address.
+        let mut active_locals: BTreeSet<u32> = BTreeSet::new();
+        // The written slots of every frame below the current one,
+        // indexed by `context_stack` depth, so a caller's locals are
+        // reported again once its callee returns.
+        let mut caller_locals: Vec<BTreeSet<u32>> = Vec::new();
         // Stack of context names for call/return tracking.
         let mut context_stack: Vec<String> = Vec::new();
         // Current procedure's num_locals for memory address calculation.
@@ -464,6 +470,24 @@ impl MidenTracer {
                 }
             }
 
+            // A `loc_store.N` has written its slot only once its last
+            // cycle ran; report the slot from that state, inside the
+            // step of the line that stored it. (A one-cycle store is
+            // handled after its step is registered, further below.)
+            if asmop.cycle_idx() == asmop.num_cycles()
+                && asmop.cycle_idx() != 1
+                && let Some(slot) = parse_loc_store(asmop.op())
+            {
+                active_locals.insert(slot);
+                emit_active_locals(
+                    &mut *self.writer,
+                    &state,
+                    &active_locals,
+                    current_num_locals,
+                    felt_type_id,
+                );
+            }
+
             // Only process the first cycle of each assembly instruction to avoid duplicates.
             if asmop.cycle_idx() != 1 {
                 continue;
@@ -484,6 +508,7 @@ impl MidenTracer {
 
             // -- Call / Return detection via context_name changes ------------------------
             if prev_context_name.as_deref() != Some(&context_name) {
+                let depth_before = context_stack.len();
                 // Register the newly-observed procedure in the function
                 // table unconditionally — every procedure that surfaces
                 // as a `context_name` (including the very first one,
@@ -674,6 +699,14 @@ impl MidenTracer {
                         // see `test_nested_calls_test_via_ct_print_full`
                         // where `compute → outer → middle → inner`
                         // surfaces only as the deepest context.
+                        //
+                        // When `prev` itself invokes `ctx`, the transition
+                        // is that call, even if the caller also invokes
+                        // both: `nested_outer` calling `conditional_branch`
+                        // from a `begin` block that calls each of them is
+                        // a deeper call, and treating it as a sibling
+                        // would re-enter `nested_outer` as a fresh frame
+                        // when `conditional_branch` returns.
                         let caller_invokes_both = context_stack
                             .last()
                             .and_then(|caller| call_graph.get(bare_proc_name(caller)))
@@ -682,8 +715,11 @@ impl MidenTracer {
                                     && callees.contains(bare_proc_name(&context_name))
                             })
                             .unwrap_or(false);
+                        let prev_invokes_ctx = call_graph
+                            .get(bare_proc_name(prev_ctx))
+                            .is_some_and(|callees| callees.contains(bare_proc_name(&context_name)));
 
-                        if caller_invokes_both {
+                        if caller_invokes_both && !prev_invokes_ctx {
                             // Sibling: close the previous call first.
                             TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
                             // Stage call args from the operand stack — same
@@ -745,7 +781,17 @@ impl MidenTracer {
                     })
                     .copied()
                     .unwrap_or(0);
-                active_locals.clear();
+                // Returning to a caller restores the slots it had
+                // written; entering a new frame starts with none.
+                let depth_after = context_stack.len();
+                if caller_locals.len() <= depth_before {
+                    caller_locals.resize_with(depth_before + 1, BTreeSet::new);
+                }
+                caller_locals[depth_before] = std::mem::take(&mut active_locals);
+                if depth_after < depth_before {
+                    active_locals = std::mem::take(&mut caller_locals[depth_after]);
+                }
+                caller_locals.truncate(depth_after);
                 prev_context_name = Some(context_name.clone());
             }
 
@@ -771,12 +817,6 @@ impl MidenTracer {
                 step_moved_past_first = false;
             } else if step_first_op.as_deref() != Some(op_str) {
                 step_moved_past_first = true;
-            }
-
-            // -- Track local memory slots ------------------------------------------------
-            // When we see loc_store.N, mark slot N as active.
-            if let Some(slot) = parse_loc_store(op_str) {
-                active_locals.insert(slot, ());
             }
 
             // -- Emit stack top values as variables --------------------------------------
@@ -881,32 +921,27 @@ impl MidenTracer {
             }
 
             // -- Emit local memory slot values -------------------------------------------
-            // In Miden, local slot N is at address: fmp - (num_locals - N).
-            // We look up each active slot's address in state.memory.
-            if !active_locals.is_empty() && current_num_locals > 0 {
-                let fmp = state.fmp.as_int();
-                for &slot in active_locals.keys() {
-                    let offset = current_num_locals as u64 - slot as u64;
-                    if fmp >= offset {
-                        let addr = (fmp - offset) as u32;
-                        let target_addr = miden_processor::MemoryAddress::from(addr);
-                        if let Some(&(_, felt_val)) =
-                            state.memory.iter().find(|(a, _)| *a == target_addr)
-                        {
-                            let int_val = felt_val.as_int() as i64;
-                            let name = format!("local[{}]", slot);
-                            let value = ValueRecord::Int {
-                                i: int_val,
-                                type_id: felt_type_id,
-                            };
-                            TraceWriter::register_variable_with_full_value(
-                                &mut *self.writer,
-                                &name,
-                                value,
-                            );
-                        }
-                    }
-                }
+            // Each slot written so far, as it stands before this asmop runs.
+            emit_active_locals(
+                &mut *self.writer,
+                &state,
+                &active_locals,
+                current_num_locals,
+                felt_type_id,
+            );
+            // A one-cycle `loc_store.N` has already written its slot in
+            // this state.
+            if asmop.num_cycles() == 1
+                && let Some(slot) = parse_loc_store(op_str)
+            {
+                active_locals.insert(slot);
+                emit_active_locals(
+                    &mut *self.writer,
+                    &state,
+                    &active_locals,
+                    current_num_locals,
+                    felt_type_id,
+                );
             }
         }
 
@@ -956,6 +991,40 @@ impl MidenTracer {
 }
 
 /// Parse `loc_store.N` from an op string, returning the slot number N.
+/// Register `local[N]` for every written slot of the current frame,
+/// read from `state`'s memory. In Miden, local slot N of a procedure
+/// declaring `num_locals` slots is at address `fmp - (num_locals - N)`.
+fn emit_active_locals(
+    writer: &mut dyn TraceWriter,
+    state: &VmState,
+    active_locals: &BTreeSet<u32>,
+    num_locals: u16,
+    felt_type_id: codetracer_trace_types::TypeId,
+) {
+    if active_locals.is_empty() || num_locals == 0 {
+        return;
+    }
+    let fmp = state.fmp.as_int();
+    for &slot in active_locals {
+        let offset = num_locals as u64 - slot as u64;
+        if fmp < offset {
+            continue;
+        }
+        let target_addr = miden_processor::MemoryAddress::from((fmp - offset) as u32);
+        if let Some(&(_, felt_val)) = state.memory.iter().find(|(a, _)| *a == target_addr) {
+            let value = ValueRecord::Int {
+                i: felt_val.as_int() as i64,
+                type_id: felt_type_id,
+            };
+            TraceWriter::register_variable_with_full_value(
+                writer,
+                &format!("local[{slot}]"),
+                value,
+            );
+        }
+    }
+}
+
 fn parse_loc_store(op: &str) -> Option<u32> {
     op.strip_prefix("loc_store.")
         .and_then(|s| s.parse::<u32>().ok())

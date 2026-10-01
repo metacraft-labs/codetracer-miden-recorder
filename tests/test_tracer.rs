@@ -6356,3 +6356,114 @@ fn test_transaction_note_consume_test_via_ct_print_full() {
          (3 notes * 3 felts per note)",
     );
 }
+
+// ---------------------------------------------------------------------------
+// masm_flow_test.masm — locals of a frame that called other procedures
+// ---------------------------------------------------------------------------
+
+/// Every `local[N]` sample the steps on `line` (inside `proc_name`)
+/// carry, in event order.
+fn local_samples_on_line(
+    doc: &serde_json::Value,
+    proc_name: &str,
+    line: i64,
+) -> HashMap<String, Vec<i64>> {
+    let events = doc["events"].as_array().expect("events array");
+    let mut stack: Vec<String> = Vec::new();
+    let mut samples: HashMap<String, Vec<i64>> = HashMap::new();
+    for ev in events {
+        match ev["kind"].as_str() {
+            Some("call_entry") => {
+                stack.push(ev["function"].as_str().unwrap_or_default().to_string())
+            }
+            Some("call_exit") => {
+                stack.pop();
+            }
+            Some("step") => {
+                let in_proc = stack.last().is_some_and(|f| f.ends_with(proc_name));
+                if !in_proc || ev["line"].as_i64() != Some(line) {
+                    continue;
+                }
+                for v in ev["vars"].as_array().cloned().unwrap_or_default() {
+                    let Some(name) = v["varname"].as_str() else {
+                        continue;
+                    };
+                    if name.starts_with("local[") {
+                        let val = v["value"]["i"].as_i64().expect("Int.i");
+                        samples.entry(name.to_string()).or_default().push(val);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    samples
+}
+
+/// `nested_outer` stores fib(10) in local[0], calls
+/// `conditional_branch`, stores its result in local[1], and on line
+/// 126 (`loc_load.0 loc_load.1 add loc_store.2`) combines them into
+/// local[2].  Two things must hold on that line:
+///
+///   * local[0], written before the calls, is still reported after
+///     they return: a callee's frame does not erase the caller's.
+///   * local[2] is reported only with the value the store wrote
+///     (165), never with what its memory cell held before the store
+///     (400, left there by `stack_manip`, whose frame occupied the
+///     same addresses earlier).
+#[test]
+fn test_masm_flow_nested_outer_locals_survive_calls() {
+    let Some((doc, _)) = record_and_dump_full(
+        "test_masm_flow_nested_outer_locals_survive_calls",
+        "masm_flow_test.masm",
+    ) else {
+        return;
+    };
+
+    // `conditional_branch` runs inside `nested_outer`'s frame, and
+    // `nested_outer` is entered once: returning from its callee is not
+    // a fresh call.
+    let mut stack: Vec<String> = Vec::new();
+    let mut nested_outer_entries = 0;
+    let mut branch_parents: Vec<String> = Vec::new();
+    for ev in doc["events"].as_array().expect("events array") {
+        match ev["kind"].as_str() {
+            Some("call_entry") => {
+                let f = ev["function"].as_str().unwrap_or_default().to_string();
+                if f.ends_with("nested_outer") {
+                    nested_outer_entries += 1;
+                }
+                if f.ends_with("conditional_branch") {
+                    branch_parents.push(stack.last().cloned().unwrap_or_default());
+                }
+                stack.push(f);
+            }
+            Some("call_exit") => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(nested_outer_entries, 1, "nested_outer is called once");
+    assert!(
+        branch_parents.iter().any(|p| p.ends_with("nested_outer")),
+        "conditional_branch must be entered from nested_outer at least once; parents={branch_parents:?}",
+    );
+
+    let samples = local_samples_on_line(&doc, "nested_outer", 126);
+    let expected = [("local[0]", 55i64), ("local[1]", 110), ("local[2]", 165)];
+    let mut names: Vec<&String> = samples.keys().collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["local[0]", "local[1]", "local[2]"],
+        "line 126 of nested_outer must report exactly local[0..2]; samples={samples:?}",
+    );
+    for (name, want) in expected {
+        let got = &samples[name];
+        assert!(
+            got.iter().all(|v| *v == want),
+            "{name} on line 126 must only ever read {want}; samples={got:?}",
+        );
+    }
+}
