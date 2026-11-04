@@ -1794,7 +1794,7 @@ fn test_memory_ops_mem_writer_registered() {
 
 /// Records `assertions_pass_test.masm` — three assertions that all
 /// hold (assert.1, assertz.0, assert_eq.42.42) plus a marker push of
-/// 999.  No `ioError` event must appear.
+/// 999.  No `Error` event must appear.
 #[test]
 fn test_assertions_pass_test_via_ct_print_full() {
     let Some((doc, source_path)) = record_and_dump_full(
@@ -1856,14 +1856,14 @@ fn test_assertions_pass_test_via_ct_print_full() {
         .expect("stack[0] in marker step");
     assert_eq!(stack0["value"]["i"].as_i64(), Some(999));
 
-    // ----- No ioError event must appear --------------------------------
+    // ----- No Error event must appear --------------------------------
     let io_errors = events
         .iter()
-        .filter(|e| e["kind"] == "io" && e["io_kind"] == "ioError")
+        .filter(|e| e["kind"] == "io" && e["io_kind"] == "Error")
         .count();
     assert_eq!(
         io_errors, 0,
-        "passing assertions must NOT emit any ioError events"
+        "passing assertions must NOT emit any Error events"
     );
 }
 
@@ -1888,7 +1888,7 @@ fn test_assertions_pass_checks_registered() {
 }
 
 // ---------------------------------------------------------------------------
-// assertion_fail_test.masm — `assert` on 0 (must surface as ioError)
+// assertion_fail_test.masm — `assert` on 0 (must surface as Error)
 // ---------------------------------------------------------------------------
 
 /// Records `assertion_fail_test.masm`, which deliberately violates
@@ -1898,7 +1898,7 @@ fn test_assertions_pass_checks_registered() {
 ///   returns Ok — the failure is surfaced inside the trace, not by
 ///   panicking the recorder process; same convention as Cairo /
 ///   Cardano / Fuel / PolkaVM).
-/// * Emit exactly one `ioError` event with the literal "assertion
+/// * Emit exactly one `Error` event with the literal "assertion
 ///   failed" payload.
 /// * Emit no `call_entry` events (the recorder doesn't have time to
 ///   observe a context_name transition before the VM aborts).
@@ -1945,7 +1945,7 @@ fn test_assertion_fail_test_via_ct_print_full() {
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(1),
-        "exactly one ioError must be emitted for the failing assert; counts={counts}"
+        "exactly one Error must be emitted for the failing assert; counts={counts}"
     );
 
     let events = doc["events"].as_array().expect("events array");
@@ -1953,13 +1953,13 @@ fn test_assertion_fail_test_via_ct_print_full() {
     // The extra call_entry/call_exit pair is the `<toplevel>` root frame `start` opens.
     assert_eq!(events.len(), 5, "events.len()");
 
-    // ----- The single io_event must be an `ioError` carrying the
+    // ----- The single io_event must be an `Error` carrying the
     // canonical "assertion failed" payload from the Miden VM.
     let io_event = events
         .iter()
         .find(|e| e["kind"] == "io")
         .expect("expected one io event");
-    assert_eq!(io_event["io_kind"].as_str(), Some("ioError"));
+    assert_eq!(io_event["io_kind"].as_str(), Some("Error"));
     let text = io_event["text"].as_str().expect("io.text");
     assert!(
         text.contains("assertion failed"),
@@ -2823,7 +2823,7 @@ fn test_local_word_ops_test_via_ct_print_full() {
 /// Records `assertion_error_codes_test.masm` and pins:
 ///   * The recorder's outer `record()` returns Ok cleanly (the
 ///     trace is finalised even though the VM aborted).
-///   * Exactly one `ioError` event is emitted.
+///   * Exactly one `Error` event is emitted.
 ///   * The user-supplied `err="err=42"` modifier is preserved
 ///     verbatim in the io_event text payload (parallel to
 ///     Cairo's panic-felt and Move's abort-code routing).
@@ -2863,7 +2863,7 @@ fn test_assertion_error_codes_test_via_ct_print_full() {
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(1),
-        "exactly one ioError must be emitted; counts={counts}",
+        "exactly one Error must be emitted; counts={counts}",
     );
 
     let events = doc["events"].as_array().expect("events array");
@@ -2871,7 +2871,7 @@ fn test_assertion_error_codes_test_via_ct_print_full() {
         .iter()
         .find(|e| e["kind"] == "io")
         .expect("expected one io event");
-    assert_eq!(io_event["io_kind"].as_str(), Some("ioError"));
+    assert_eq!(io_event["io_kind"].as_str(), Some("Error"));
     let text = io_event["text"].as_str().expect("io.text");
     // The user-supplied err="err=42" modifier must appear
     // verbatim in the diagnostic text.  This is the contract
@@ -4672,7 +4672,7 @@ fn test_hash_primitives_test_via_ct_print_full() {
 ///     `MemAdviceProvider` so `adv_push.N` / `adv_loadw` no
 ///     longer fail at runtime with an empty advice stack.
 ///   * Every advice-tape read surfaces as a distinct io_event
-///     with `io_kind == "ioFileOp"` (the multi-stream mapping for
+///     with `io_kind == "Read"` (the multi-stream mapping for
 ///     `EventLogKind::Read`) and a content payload prefixed with
 ///     `advice_read kind=...` so downstream tooling can filter on
 ///     the advice-tape source.
@@ -4761,14 +4761,13 @@ fn test_advice_tape_test_via_ct_print_full() {
     let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 4, "exactly 4 advice-tape io_events");
 
-    // All four events use the `ioFileOp` channel (the multi-stream
-    // mapping for `EventLogKind::Read`).  Pinning catches a future
-    // routing change to e.g. `ioStdout`.
+    // All four events are `EventLogKind::Read`.  Pinning catches a
+    // future routing change to e.g. `Write`.
     for ev in &io_events {
         assert_eq!(
             ev["io_kind"].as_str(),
-            Some("ioFileOp"),
-            "advice-tape read must route to ioFileOp; got {ev}",
+            Some("Read"),
+            "advice-tape read must route to Read; got {ev}",
         );
     }
 
@@ -6086,7 +6085,7 @@ fn test_cross_context_call_return_value_reobserved_at_boundary() {
 ///     boundary).
 ///   * 1 (#main) + 3 * 3 (per-note recv/unwrap/store) = 10 calls.
 ///   * 9 io_events for the 9 `adv_push.1` reads (3 per note,
-///     all routed through the `ioFileOp` channel and tagged with
+///     all routed through the `Read` channel and tagged with
 ///     `advice_read kind=adv_push count=1 values=[...]`).
 ///   * Per-`note_store` call_entry args pin the (key, value)
 ///     pair the note unwrapped: the s0 felt is always 200 (the
@@ -6199,7 +6198,7 @@ fn test_transaction_note_consume_test_via_ct_print_full() {
     // consecutive `adv_push.1` reads, repeated for the three
     // notes.  Pinning both the discriminator (`advice_read
     // kind=adv_push count=1`) and the value list catches
-    // (a) a future re-routing of advice reads off the `ioFileOp`
+    // (a) a future re-routing of advice reads off the `Read`
     // channel and (b) any reordering of the per-note triple.
     let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 9, "exactly 9 advice-tape io_events");
@@ -6207,8 +6206,8 @@ fn test_transaction_note_consume_test_via_ct_print_full() {
     for ev in &io_events {
         assert_eq!(
             ev["io_kind"].as_str(),
-            Some("ioFileOp"),
-            "advice-tape read must route to ioFileOp; got {ev}",
+            Some("Read"),
+            "advice-tape read must route to Read; got {ev}",
         );
     }
 
@@ -6355,4 +6354,115 @@ fn test_transaction_note_consume_test_via_ct_print_full() {
         "parse_advice_stack must return the declared 9-felt tape \
          (3 notes * 3 felts per note)",
     );
+}
+
+// ---------------------------------------------------------------------------
+// masm_flow_test.masm — locals of a frame that called other procedures
+// ---------------------------------------------------------------------------
+
+/// Every `local[N]` sample the steps on `line` (inside `proc_name`)
+/// carry, in event order.
+fn local_samples_on_line(
+    doc: &serde_json::Value,
+    proc_name: &str,
+    line: i64,
+) -> HashMap<String, Vec<i64>> {
+    let events = doc["events"].as_array().expect("events array");
+    let mut stack: Vec<String> = Vec::new();
+    let mut samples: HashMap<String, Vec<i64>> = HashMap::new();
+    for ev in events {
+        match ev["kind"].as_str() {
+            Some("call_entry") => {
+                stack.push(ev["function"].as_str().unwrap_or_default().to_string())
+            }
+            Some("call_exit") => {
+                stack.pop();
+            }
+            Some("step") => {
+                let in_proc = stack.last().is_some_and(|f| f.ends_with(proc_name));
+                if !in_proc || ev["line"].as_i64() != Some(line) {
+                    continue;
+                }
+                for v in ev["vars"].as_array().cloned().unwrap_or_default() {
+                    let Some(name) = v["varname"].as_str() else {
+                        continue;
+                    };
+                    if name.starts_with("local[") {
+                        let val = v["value"]["i"].as_i64().expect("Int.i");
+                        samples.entry(name.to_string()).or_default().push(val);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    samples
+}
+
+/// `nested_outer` stores fib(10) in local[0], calls
+/// `conditional_branch`, stores its result in local[1], and on line
+/// 126 (`loc_load.0 loc_load.1 add loc_store.2`) combines them into
+/// local[2].  Two things must hold on that line:
+///
+///   * local[0], written before the calls, is still reported after
+///     they return: a callee's frame does not erase the caller's.
+///   * local[2] is reported only with the value the store wrote
+///     (165), never with what its memory cell held before the store
+///     (400, left there by `stack_manip`, whose frame occupied the
+///     same addresses earlier).
+#[test]
+fn test_masm_flow_nested_outer_locals_survive_calls() {
+    let Some((doc, _)) = record_and_dump_full(
+        "test_masm_flow_nested_outer_locals_survive_calls",
+        "masm_flow_test.masm",
+    ) else {
+        return;
+    };
+
+    // `conditional_branch` runs inside `nested_outer`'s frame, and
+    // `nested_outer` is entered once: returning from its callee is not
+    // a fresh call.
+    let mut stack: Vec<String> = Vec::new();
+    let mut nested_outer_entries = 0;
+    let mut branch_parents: Vec<String> = Vec::new();
+    for ev in doc["events"].as_array().expect("events array") {
+        match ev["kind"].as_str() {
+            Some("call_entry") => {
+                let f = ev["function"].as_str().unwrap_or_default().to_string();
+                if f.ends_with("nested_outer") {
+                    nested_outer_entries += 1;
+                }
+                if f.ends_with("conditional_branch") {
+                    branch_parents.push(stack.last().cloned().unwrap_or_default());
+                }
+                stack.push(f);
+            }
+            Some("call_exit") => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(nested_outer_entries, 1, "nested_outer is called once");
+    assert!(
+        branch_parents.iter().any(|p| p.ends_with("nested_outer")),
+        "conditional_branch must be entered from nested_outer at least once; parents={branch_parents:?}",
+    );
+
+    let samples = local_samples_on_line(&doc, "nested_outer", 126);
+    let expected = [("local[0]", 55i64), ("local[1]", 110), ("local[2]", 165)];
+    let mut names: Vec<&String> = samples.keys().collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["local[0]", "local[1]", "local[2]"],
+        "line 126 of nested_outer must report exactly local[0..2]; samples={samples:?}",
+    );
+    for (name, want) in expected {
+        let got = &samples[name];
+        assert!(
+            got.iter().all(|v| *v == want),
+            "{name} on line 126 must only ever read {want}; samples={got:?}",
+        );
+    }
 }
