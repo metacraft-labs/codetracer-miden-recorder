@@ -29,6 +29,7 @@ lint:
   cargo fmt --check
   cargo clippy --locked --all-targets -- -D warnings
   bash tests/verify-cli-convention-no-silent-skip.sh
+  bash tests/verify-dev-shell-evaluates-on-darwin.sh
 
 format:
   cargo fmt
