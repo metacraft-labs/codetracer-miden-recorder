@@ -123,6 +123,11 @@ package codetracer_miden_recorder:
     # ``nimble install --depsOnly`` in ``codetracer_trace_writer_nim``'s
     # build.rs fetches the FFI's requirements with git.
     "git"
+    # just runs the Justfile recipes, which CI's cross-check steps call
+    # through `dev-exec` (`repro exec`), so it must be declared here: the
+    # activated environment's PATH is the runner's plus the declared tools,
+    # and the Windows runner has no `just`.
+    "just"
     # `choco pack` / `choco push` in .github/workflows/publish-chocolatey.yml.
     # Windows-guarded because Chocolatey is a Windows package manager with no
     # POSIX build, so an unguarded entry would fail to resolve on Linux/macOS.
