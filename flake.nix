@@ -2,7 +2,7 @@
   description = "CodeTracer Miden Recorder";
 
   inputs = {
-    mcl-blockchain.url = "github:metacraft-labs/nix-blockchain-development";
+    mcl-blockchain.url = "github:metacraft-labs/nix-blockchain-development/agents";
     nixpkgs.follows = "mcl-blockchain/nixpkgs";
     flake-utils.follows = "mcl-blockchain/flake-utils";
   };
@@ -22,8 +22,14 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          inputsFrom = [ mcl-blockchain.devShells.${system}.miden ];
+          # nix-blockchain-development exports its `miden` shell only where its
+          # SDK exists (Linux). Elsewhere, such as macOS, the tools it would
+          # supply are declared below, so the shell still evaluates.
+          inputsFrom = pkgs.lib.optional (
+            mcl-blockchain.devShells.${system} ? miden
+          ) mcl-blockchain.devShells.${system}.miden;
           packages = [
+            pkgs.openssl # openssl-sys; not supplied where the mcl-blockchain shell is absent
             pkgs.zstd # required by libcodetracer_trace_writer (Nim FFI)
             # Declare the toolchain explicitly so CI's dev shell
             # mirrors local dev exactly.  Cached mcl-blockchain
