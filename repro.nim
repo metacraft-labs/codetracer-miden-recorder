@@ -117,6 +117,12 @@ package codetracer_miden_recorder:
     # the same ``bash tests/verify-cli-convention-no-silent-skip.sh``
     # step ``just test`` runs after ``cargo test``.
     "sh"
+    "bash"
+    "dirname"
+    "grep"
+    # ``nimble install --depsOnly`` in ``codetracer_trace_writer_nim``'s
+    # build.rs fetches the FFI's requirements with git.
+    "git"
     # `choco pack` / `choco push` in .github/workflows/publish-chocolatey.yml.
     # Windows-guarded because Chocolatey is a Windows package manager with no
     # POSIX build, so an unguarded entry would fail to resolve on Linux/macOS.
@@ -235,5 +241,31 @@ package codetracer_miden_recorder:
         "Cargo.toml", "Cargo.lock", "src"
       ],
       cacheable = false)
+
+    # ---- Tool identities each edge runs --------------------------------
+    #
+    # A ``uses:`` declaration alone does not reach an edge: under typed
+    # provisioning an action's PATH (and pkg-config search path) is built
+    # from the tool identities registered on it. Without these the cargo
+    # edges ran with no ``nim`` / ``nimble`` on PATH, and
+    # ``codetracer_trace_writer_nim``'s build.rs failed at ``nimble install
+    # --depsOnly``; on macOS they also ran without the Nix clang wrapper, so
+    # linking zstd-sys's build script failed on ``-liconv``. Every cargo edge
+    # builds that crate, so each gets what its build scripts run: ``nimble``
+    # (which fetches with ``git``) and ``nim`` for the Nim FFI, ``capnp`` for
+    # ``codetracer_trace_format_capnp``, the C compiler for cc-rs builds
+    # (zstd-sys, ring, ...) and rustc's link step, and ``pkg-config``, which
+    # the ``pkg-config`` crate consults for system libraries.
+    # Windows registers no C compiler: Cargo links with MSVC there and the
+    # Nim FFI compiles with ``--cc:vcc``. The CLI check runs ``cargo build``
+    # itself, so it takes the same set plus its script's own tools.
+    for action in [recorderBuild, testsBuild.action, testsRun.action, cliVerify]:
+      appendRegisteredActionToolIdentityRefs(action.id,
+        ["cargo", "rustc", "nim", "nimble", "git", "capnp", "zstd"])
+      when defined(linux):
+        appendRegisteredActionToolIdentityRefs(action.id, ["gcc", "pkg-config"])
+      elif defined(macosx):
+        appendRegisteredActionToolIdentityRefs(action.id, ["clang", "pkg-config"])
+    appendRegisteredActionToolIdentityRefs(cliVerify.id, ["sh", "bash", "dirname", "grep"])
 
     discard collect("test", @[testsRun.action, cliVerify])
